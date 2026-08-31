@@ -1,6 +1,6 @@
 # 宿主与系统兼容边界
 
-核心协议只依赖 `agy` 和宿主内置终端，不依赖 Codex 插件。技能发现、终端 session 和授权 UI 仍由各宿主实现。
+核心协议由 `agy`、宿主内置终端和工作区任务文件组成。技能发现、终端 session 和授权 UI 由各宿主实现。
 
 ## 宿主最低契约
 
@@ -32,4 +32,3 @@
 - Codex 可读取 `agents/openai.yaml`，并用 unified terminal session 监督长进程。
 - 其他支持 Agent Skills 的宿主可复用 SKILL.md 与 references，忽略 Codex 专属元数据。
 - 只把 Markdown 当说明但不支持技能发现的 Agent，需要用户按该产品方式安装或显式附加本目录；这不改变原生 Agy 调用协议。
-

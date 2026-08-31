@@ -1,6 +1,6 @@
 # Gemini Help Me
 
-> **Plugin-free Agent Skill for delegating precise TASK.md work to Gemini through the native Agy CLI.**
+> **A standalone Agent Skill for delegating precise TASK.md work to Gemini through the native Agy CLI.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Model: gemini--3.7--flash--high](https://img.shields.io/badge/Model-gemini--3.7--flash--high-orange.svg)](https://deepmind.google/technologies/gemini/)
@@ -14,13 +14,13 @@ English documentation is provided below, with a [Chinese Quick Guide / 中文快
 
 `gemini-help-me` is an Agent Skill that enables your host AI Agent (e.g., Codex, Claude Code, or terminal-based agents) to dispatch self-contained coding, review, and refactoring tasks directly to Google's `gemini-3.7-flash-high` model using the native headless `agy` CLI.
 
-Instead of relying on fragile plugins, background companion daemons, or complex cache layers, `gemini-help-me` establishes a clean, file-based contract protocol using a dedicated `TASK.md` inside your workspace.
+`gemini-help-me` provides a self-contained, file-based contract protocol using a dedicated `TASK.md` inside your workspace.
 
 ---
 
 ## Problems Solved
 
-1. **Eliminating Plugin & Daemon Fragility**: Many agent extensions depend on complex sidecar daemons, Node/Python companion runtimes, or unmanaged caches that break across updates or sandbox environments. `gemini-help-me` has zero runtime dependencies beyond the native `agy` binary.
+1. **Direct Native Delegation**: The host Agent invokes the native `agy` binary from its built-in terminal and retains responsibility for task shaping, authorization, supervision, and acceptance.
 2. **Eliminating Shell Quoting & Argument Length Limits**: Passing large prompts or code blocks directly via shell `argv` frequently leads to escaping bugs (e.g., PowerShell `$()` expansion, double quotes, backticks) or OS command-length truncation. By writing the full task specification to a local `TASK.md` file, the command-line invocation remains short, static, and safe.
 3. **Structured Division of Labor**:
    - **Host Agent (Supervisor)**: Formulates objectives, defines constraints, sets acceptance criteria, inspects file changes, and makes final verification.
@@ -29,12 +29,12 @@ Instead of relying on fragile plugins, background companion daemons, or complex 
 
 ---
 
-## Why Plugin-Free?
+## Standalone Architecture
 
-- **Zero Companion Daemons**: No background daemon services to manage, monitor, or restart.
-- **Zero Runtime Dependencies**: No Node.js, Python, or MCP wrappers required to bridge the host agent and Agy.
-- **Native CLI Execution**: Dispatches directly to the native `agy` command line tool available in the system PATH.
-- **Standardized Agent Skill Protocol**: Compatible across any agent environment capable of running terminal commands and reading workspace files.
+- **Self-Contained Skill**: The complete delegation and supervision protocol lives in `SKILL.md` and its focused references.
+- **Native CLI Execution**: Tasks are dispatched directly to the `agy` command available in the system PATH.
+- **File-Based Contract**: The full task stays in a workspace `TASK.md`, while the command-line prompt remains fixed and short.
+- **Portable Host Contract**: Any Agent environment capable of running terminal commands and reading workspace files can adopt the workflow.
 
 ---
 
@@ -148,7 +148,6 @@ agy -p 'Read ".gemini-help-me/tasks/task-001/TASK.md" in full before acting. Exe
 | :--- | :--- | :--- |
 | **Direct Shell Prompt** | Command length limits; escaping bugs with quotes, `$()`, or backticks; shell injection vulnerabilities. | Uses a static, immutable argv string; puts full context in a local Markdown file. |
 | **Interactive Chat** | Context drift over time; ambiguous task goals; lack of structured verification criteria. | Formalizes an immutable contract (`TASK.md`) containing scope, decisions, and acceptance gates. |
-| **Plugin / Companion** | Daemon crashes; complex version coupling; hidden side effects. | Zero-daemon, headless native CLI execution directly from the host agent's terminal. |
 
 ---
 
@@ -207,10 +206,10 @@ gemini-help-me/
 ## Chinese Quick Guide / 中文快速说明
 
 ### 一句话定位
-无需任何额外插件的 Agent Skill，通过本机原生 `agy` CLI 把工作区 `TASK.md` 明确契约交给 `gemini-3.7-flash-high` 执行并由宿主 Agent 监督验收。
+这是一个独立 Agent Skill，通过本机原生 `agy` CLI 把工作区 `TASK.md` 明确契约交给 `gemini-3.7-flash-high` 执行并由宿主 Agent 监督验收。
 
 ### 核心特性
-- **无插件依赖**：不依赖 `agy-staff`、后台伴侣守护进程、Node.js/Python 运行时或 MCP 服务。
+- **独立 Skill**：完整调度与监督协议由 `SKILL.md` 及其参考文件定义，可作为独立 Agent Skill 安装和分享。
 - **短 argv 契约机制**：命令提示词固定且简短，消除 Shell 引号转义、变量展开注入和长命令行截断问题。
 - **严格模型绑定**：显式固定 `gemini-3.7-flash-high`，不可用时立即失败，不隐式降级。
 - **独立监督与验收**：宿主 Agent 负责需求收敛、生成 TASK.md、运行 agy 并独立检查 Git 变动与测试产物。

@@ -8,9 +8,9 @@ Thank you for your interest in improving `gemini-help-me`! We welcome contributi
 
 Before submitting changes, please ensure your contribution aligns with the project's non-negotiable architectural decisions:
 
-1. **Plugin-Free Architecture**:
-   - Zero runtime daemons, companion background services, Node.js/Python wrappers, or MCP sidecars.
-   - All execution relies strictly on the native, headless `agy` CLI executed from the host Agent's built-in terminal.
+1. **Standalone Architecture**:
+   - The delegation and supervision protocol remains self-contained in the skill and its focused references.
+   - Execution uses the native, headless `agy` CLI from the host Agent's built-in terminal.
 
 2. **File-Based Task Contract (TASK.md)**:
    - Tasks are articulated in `.gemini-help-me/tasks/<task-id>/TASK.md`.
@@ -35,7 +35,7 @@ Before submitting changes, please ensure your contribution aligns with the proje
 
 ### 2. Suggesting Features
 - Use the [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) template.
-- Ensure the proposed feature maintains the plugin-free and native Agy CLI approach.
+- Ensure the proposed feature preserves the standalone skill contract and native Agy CLI approach.
 
 ### 3. Submitting Pull Requests
 1. Fork the repository and create your branch from `main`.

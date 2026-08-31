@@ -8,9 +8,8 @@ body:
   attributes:
     value: 'Thank you for suggesting a feature or improvement!
 
-      Please note that `gemini-help-me` is intentionally designed to be **plugin-free**,
-      relying only on native Agy CLI calls without companion services, daemons, or
-      runtime sidecars.'
+      `gemini-help-me` is a standalone Agent Skill built around native Agy CLI calls
+      and a file-based TASK.md contract.'
 - type: textarea
   id: problem-statement
   attributes:
@@ -35,8 +34,7 @@ body:
     label: Host Agent / Environment Considerations
     description: How does this proposed change affect compatibility across host agents
       (Codex, Claude Code, etc.) or platforms (Windows, macOS, Linux)?
-    placeholder: Compatible across all POSIX and Windows shells without requiring
-      additional plugins.
+    placeholder: Compatible across supported POSIX and Windows host environments.
   validations:
     required: false
 - type: textarea
