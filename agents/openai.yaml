@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Help Me"
+  short_description: "用原生 Agy 调度一个明确的 Gemini 执行任务"
+  default_prompt: "使用 $gemini-help-me 把当前目标写成一个 TASK.md，固定交给 gemini-3.7-flash-high 执行，并监督验收。"
+

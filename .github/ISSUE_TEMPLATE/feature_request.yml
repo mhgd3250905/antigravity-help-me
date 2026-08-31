@@ -1,0 +1,46 @@
+name: Feature Request
+description: Suggest an enhancement or new capability for gemini-help-me
+title: '[Feature]: '
+labels:
+- enhancement
+body:
+- type: markdown
+  attributes:
+    value: "Thank you for suggesting a feature or improvement!\nPlease note that gemini-help-me\
+      \ is intentionally designed to be **plugin-free**, relying only on native \a\
+      gy CLI calls without companion services, daemons, or runtime sidecars."
+- type: textarea
+  id: problem-statement
+  attributes:
+    label: Problem Statement
+    description: Is your feature request related to a specific problem or limitation?
+      Please describe it clearly.
+    placeholder: I am always frustrated when...
+  validations:
+    required: true
+- type: textarea
+  id: proposed-solution
+  attributes:
+    label: Proposed Solution / Enhancement
+    description: Describe the solution or change you would like to see in SKILL.md,
+      references, or workflows.
+    placeholder: A clear and concise description of what you want to happen.
+  validations:
+    required: true
+- type: textarea
+  id: host-compatibility
+  attributes:
+    label: Host Agent / Environment Considerations
+    description: How does this proposed change affect compatibility across host agents
+      (Codex, Claude Code, etc.) or platforms (Windows, macOS, Linux)?
+    placeholder: Compatible across all POSIX and Windows shells without requiring
+      additional plugins.
+  validations:
+    required: false
+- type: textarea
+  id: alternatives-considered
+  attributes:
+    label: Alternatives Considered
+    description: Any alternative solutions, workarounds, or features you have considered.
+  validations:
+    required: false

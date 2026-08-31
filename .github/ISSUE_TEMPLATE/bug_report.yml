@@ -1,0 +1,90 @@
+name: Bug Report
+description: Report an issue or unexpected behavior when using gemini-help-me
+title: '[Bug]: '
+labels:
+- bug
+body:
+- type: markdown
+  attributes:
+    value: 'Thank you for reporting an issue! Please provide as much detail as possible
+      to help us reproduce and fix it.
+
+      **Security Notice**: If you have discovered a security vulnerability or credential
+      handling issue, please do **NOT** open a public issue. Follow our [Security
+      Policy](https://github.com/mhgd3250905/gemini-help-me/security/policy) in SECURITY.md
+      to report it privately.'
+- type: input
+  id: host-agent
+  attributes:
+    label: Host Agent
+    description: What host agent or environment are you running this skill with? (e.g.,
+      Codex, Claude Code, Custom Terminal Agent)
+    placeholder: e.g., Codex (Desktop), Claude Code
+  validations:
+    required: true
+- type: input
+  id: os-version
+  attributes:
+    label: Operating System
+    description: What operating system and version are you running on? (e.g., Windows
+      11 23H2, Ubuntu 24.04, macOS 14.5)
+    placeholder: e.g., Windows 11 Pro 23H2 (x64)
+  validations:
+    required: true
+- type: input
+  id: agy-version
+  attributes:
+    label: Agy CLI Version
+    description: "Run \agy --version in your terminal and paste the exact version\
+      \ string."
+    placeholder: e.g., agy 1.1.22
+  validations:
+    required: true
+- type: input
+  id: gemini-model
+  attributes:
+    label: Gemini Model
+    description: 'Model specified in invocation (Default: gemini-3.7-flash-high)'
+    placeholder: gemini-3.7-flash-high
+    value: gemini-3.7-flash-high
+  validations:
+    required: true
+- type: textarea
+  id: reproduction-steps
+  attributes:
+    label: Reproduction Steps
+    description: Describe step-by-step how to reproduce the issue.
+    placeholder: '1. Defined TASK.md with MODE: REVIEW
+
+      2. Dispatched native agy command
+
+      3. Observed error output'
+  validations:
+    required: true
+- type: textarea
+  id: expected-behavior
+  attributes:
+    label: Expected Behavior
+    description: What did you expect to happen?
+  validations:
+    required: true
+- type: textarea
+  id: actual-behavior
+  attributes:
+    label: Actual Behavior & Raw Logs
+    description: What actually happened? Paste any relevant stdout, stderr, or JSON
+      output.
+    render: shell
+  validations:
+    required: true
+- type: checkboxes
+  id: terms
+  attributes:
+    label: Pre-submission Checks
+    options:
+    - label: "I have verified that \agy is installed, logged in, and \agy models lists\
+        \ gemini-3.7-flash-high."
+      required: true
+    - label: I have confirmed this is not a security vulnerability (or have reported
+        it privately via SECURITY.md).
+      required: true

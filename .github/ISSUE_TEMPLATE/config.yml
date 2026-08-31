@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+- name: Security Vulnerability Reporting
+  url: https://github.com/mhgd3250905/gemini-help-me/security/policy
+  about: Please report security vulnerabilities and sensitive security issues privately
+    according to SECURITY.md rather than filing public issues.

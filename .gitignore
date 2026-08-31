@@ -1,0 +1,20 @@
+# Gemini Help Me task execution directories
+.gemini-help-me/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor and IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary and Output Files
+*.log
+tmp/
+temp/
+scratch/
