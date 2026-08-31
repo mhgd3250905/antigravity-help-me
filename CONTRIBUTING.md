@@ -1,6 +1,6 @@
-# Contributing to Gemini Help Me
+# Contributing to Antigravity Help Me
 
-Thank you for your interest in improving `gemini-help-me`! We welcome contributions that uphold the core principles of simplicity, reliability, and security.
+Thank you for your interest in improving `antigravity-help-me`! We welcome contributions that uphold the core principles of simplicity, reliability, and security.
 
 ---
 
@@ -10,10 +10,10 @@ Before submitting changes, please ensure your contribution aligns with the proje
 
 1. **Standalone Architecture**:
    - The delegation and supervision protocol remains self-contained in the skill and its focused references.
-   - Execution uses the native, headless `agy` CLI from the host Agent's built-in terminal.
+   - Execution uses the native Antigravity CLI (`agy`) from the host Agent's built-in terminal.
 
 2. **File-Based Task Contract (TASK.md)**:
-   - Tasks are articulated in `.gemini-help-me/tasks/<task-id>/TASK.md`.
+   - Tasks are articulated in `.antigravity-help-me/tasks/<task-id>/TASK.md`.
    - The CLI prompt passed in `argv` is fixed and minimal to eliminate shell quoting hazards, command line length limits, and prompt injection vulnerabilities.
 
 3. **Explicit Model Selection & Fail-Fast**:

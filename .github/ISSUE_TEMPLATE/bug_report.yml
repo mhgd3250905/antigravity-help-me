@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report an issue or unexpected behavior when using gemini-help-me
+description: Report an issue or unexpected behavior when using antigravity-help-me
 title: '[Bug]: '
 labels:
 - bug
@@ -10,7 +10,7 @@ body:
       to help us reproduce and fix it.
 
       **Security Notice**: If you have discovered a security vulnerability or credential
-      handling issue, please do NOT open a public issue. Follow our [Security Policy](https://github.com/mhgd3250905/gemini-help-me/security/policy)
+      handling issue, please do NOT open a public issue. Follow our [Security Policy](https://github.com/mhgd3250905/antigravity-help-me/security/policy)
       in `SECURITY.md` to report it privately.'
 - type: input
   id: host-agent

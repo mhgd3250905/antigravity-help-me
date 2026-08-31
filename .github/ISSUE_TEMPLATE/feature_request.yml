@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest an enhancement or new capability for gemini-help-me
+description: Suggest an enhancement or new capability for antigravity-help-me
 title: '[Feature]: '
 labels:
 - enhancement
@@ -8,7 +8,7 @@ body:
   attributes:
     value: 'Thank you for suggesting a feature or improvement!
 
-      `gemini-help-me` is a standalone Agent Skill built around native Agy CLI calls
+      `antigravity-help-me` is an Agent Skill built around native Antigravity CLI (`agy`) calls
       and a file-based TASK.md contract.'
 - type: textarea
   id: problem-statement
