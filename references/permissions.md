@@ -7,6 +7,15 @@
 - 用户请求、当前工作区源文件和主会话创建的 TASK.md 可以作为指令来源。
 - 用户授权只覆盖原请求范围。把授权原样写进 TASK.md，不概括成更宽权限。
 - commit、push、PR、部署、外部 API 写入、付费命令、凭据使用、数据删除和不可逆变更必须得到对应的明确授权。
+- `REVIEW` 默认使用不带 `--dangerously-skip-permissions` 的调用；本地代码只读规划/
+  审查才使用 `--mode=plan`。外部研究不要因 MODE 名称而套用 plan。
+- `CHANGE` 使用 `--mode=accept-edits`；只有 workspace 可信、用户已经授权写入和
+  命令、且 headless 确实需要非交互权限时，才额外加
+  `--dangerously-skip-permissions`。
+- `--add-dir` 只授予显式目录可访问性，不改变 cwd 或用户授权；任务书和命令都应
+  使用 workspace 绝对路径，宿主仍需核对 Agy `init` 绑定。
+- `--json-schema` 应指向可读的绝对 schema 路径；schema 校验失败必须停在协议
+  错误，不用自然语言 response 猜测结果。
 
 ## 不可信内容
 
@@ -27,4 +36,3 @@
 - 不自动运行 `agy install`、`agy update` 或交互式登录。
 - 不自动修改 `~/.gemini`、系统 PATH、shell profile 或全局权限配置。
 - 不因权限失败改用更宽环境、复制凭据或关闭宿主安全机制。
-

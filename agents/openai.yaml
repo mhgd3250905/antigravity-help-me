@@ -1,5 +1,4 @@
 interface:
   display_name: "Antigravity Help Me"
   short_description: "通过内置终端调用本机 Antigravity CLI 完成明确任务并验收"
-  default_prompt: "使用 $antigravity-help-me 把当前目标写成一个 TASK.md，固定交给 gemini-3.7-flash-high 执行，并监督验收。"
-
+  default_prompt: "使用 $antigravity-help-me 把当前目标写成带绝对路径的 TASK.md，交给 gemini-3.7-flash-high，并用结构化结果和低噪声阶段事件监督验收。"

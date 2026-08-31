@@ -2,30 +2,81 @@
 
 ## 启动前
 
-1. 记录 task id、TASK.md、MODE、工作目录、Git 基线、模型、timeout 和授权。
+1. 记录 task id、绝对 TASK.md、MODE/执行配置、绝对 workspace、Git 基线、模型、
+   `--add-dir`、实际 `--mode`（plan/accept-edits/省略）、schema、timeout 和授权。
 2. 确认本次技能没有另一个仍在运行的 Agy 进程。
-3. 确认命令 prompt 只含固定启动语和受限相对路径，没有 TASK.md 正文或用户输入。
+3. 确认 `--json-schema` 是 Agy 可读的绝对路径，prompt 只含固定协议和受限的
+   TASK.md 绝对路径，没有 TASK.md 正文或用户输入。
+4. 默认让 Agy 从目标 workspace 启动，并同时传入 `--add-dir <ABS_WORKSPACE>`；
+   不把 `--add-dir` 误认为 cwd 切换。
+5. `REVIEW` 不默认加 `--dangerously-skip-permissions`；`CHANGE` 只有在可信
+   workspace、用户授权写/命令且 headless 确实需要时才加。
+6. 若 TASK.md 声明 exact Agy 工具名，重复传入 reducer 的 `--required-tool`；不要
+   用“联网”等语义词替代工具名。
+7. reducer 必须传 `--execution-profile`；显式 resume/project 还要传
+   `--expected-conversation`/`--expected-project`；权限模式需要硬门禁时传当前版本已
+   确认的 `--expected-permission-mode`，不能只在自然语言中声称核对过。
 
 ## 运行中
 
-- 通过宿主 Agent 的内置终端启动一个前台 Agy 进程；宿主工具返回 session id 时持续等待同一 session。
-- timeout、心跳或暂时没有输出不等于失败。超过 Agy timeout 加宿主宽限后才按超时处理。
-- 只停止本次技能启动且已确认身份的进程；不按进程名批量终止全局 Agy、Node、PowerShell 或终端。
-- 新用户输入替换任务时，先终止或等待当前进程达到终态，再创建新任务。
+- 通过宿主 Agent 的内置终端启动一个前台 Agy 进程；宿主工具返回 session id 时
+  持续等待同一 session，不重新启动 Agy。
+- `--output-format stream-json` 的原始 NDJSON 必须通过
+  `scripts/agy_stream_reducer.py` 或等价的本地 reducer；不要直接显示给主模型。
+- reducer 只展示 `init`、阶段变化、warning/block、低频 heartbeat 和 final；默认
+  75 秒限频、最多约 12 条、约 2 KiB。heartbeat 由独立 timer 产生，不依赖 stdin
+  持续有事件。重复工具调用按名称聚合，文本增量和完整 tool output 丢弃。
+- raw stdout 可保存为任务目录中的有界 `stream.ndjson`，compact 最新状态可保存
+  为 `state.json`；两者在宿主上下文之外。stderr 单独落盘。
+- 管道必须独立保存 Agy producer 与 reducer 两个退出码；Agy 非零时，即使 reducer
+  已收到合法 final 也不能验收。运行前删除任务目录中的旧退出码文件。
+- timeout、心跳或暂时没有输出不等于失败。超过 Agy `--print-timeout` 加宿主宽限
+  后才按超时处理；只停止本次技能启动且已确认身份的精确 session/PID。
 
-## JSON 分流
+## init 与 workspace/project
 
-Agy 的 `--output-format json` 应返回一个 JSON 对象。stdout 有非 JSON 前缀时，只从第一个 `{` 开始尝试解析；仍不可解析则保留 stdout、stderr 和退出码并停止。
+`init.cwd` 的规范化绝对路径必须与预期 workspace 完全一致。Agy 1.1.22 没有暴露
+可依赖的 added-dir 证明字段；不要递归扫描任意 metadata 代替绑定证据。reducer
+无法证明时输出 `protocol_error`，即使模型声称任务完成也不可验收。
 
-- `status` 含 `TIMEOUT`：失败；报告 conversation id（若有），缩小任务或由用户决定增加 timeout。
-- 非 `SUCCESS` 且 response 为空：失败；逐字保留 error/stderr，不擅自换模型或权限档。
-- 非 `SUCCESS` 但 response 完整：标记 `done_with_warnings`；结果可供主会话检查，但不能自动通过。
-- `SUCCESS` 但 response 为空、usage 缺失或总 token 为 0：视为假成功，不进入验收通过。
-- `SUCCESS`、response 非空且 usage 有效：记录 conversation id，进入主会话验收。
+若指定 required tools，`init.tools` 必须存在且包含每个 exact name；否则 compact
+init 立即报告 `available_tools`/`missing_tools`，并在终态 fail-closed 为
+`protocol_error`，让宿主尽早停止当前 session。
 
-stderr 中出现 OAuth、认证、localhost bind 或 `operation not permitted` 时，先判断宿主沙箱是否隐藏 Agy 凭据或本地端口。技能不能绕过宿主安全边界。
+保存 `init` 的 cwd、project（若提供）和 conversation id。续接前逐项核对 task
+id、MODE、授权、绝对 workspace、`--add-dir`、project 和原 conversation；project
+未暴露或不一致时使用新 conversation 或停止，不能静默沿用固定的
+`default-cli-project`。不要用 project 名称猜路径。reducer 会核对 execution profile、
+实际 `/plan` expansion，以及显式提供的 expected conversation/project；不符即
+`protocol_error`。CHANGE 的 accept-edits argv 和授权仍由宿主依据命令记录复核。
 
-## 返修
+## JSON 分流与终态
 
-返修 TASK.md 只写已确认缺陷、违反的契约、预期行为和需要重跑的检查。相同错误不原样重试；先修复任务、环境或权限原因。
+Agy 的 `stream-json` 终态通常是 `type=result`，应包含 `status` 和由
+`--json-schema` 约束的 `structured_output`。reducer 独立再次检查：
 
+- `status` 异常、缺 final、缺 `structured_output`、字段缺失/多余、task id 不符或
+  schema 类型错误：`protocol_error`；
+- response 恰好为裸 `BLOCKED`：`protocol_error`，不当作有原因的阻塞；
+- 结构化 `outcome=completed`：compact final 为 `protocol=completed`，仍需宿主独立
+  检查任务产物和证据；
+- 结构化 `outcome=blocked`：reason、missing、next_steps、evidence 均非空时为
+  `protocol=blocked`；它表示可解释的任务阻塞，不表示成功。
+
+compact final 只可携带受限 summary/证据和最多三个近期事件，不携带 response 原文、
+文本 delta 或 tool output。退出码 0 只代表收到了结构化 completed/blocked；退出码
+2 代表协议失败，任何情况下都不能只凭退出码自动验收。
+
+若 stdout 有非 JSON 前缀，reducer 应把它视为 malformed stream 并停止验收；不要
+把前缀或 stderr 原样回灌模型。Python 不可用时改用 `--output-format json` 的
+final-only 降级，详见 [compatibility.md](compatibility.md)。
+
+## 返修与验收
+
+返修 TASK.md 只写已确认缺陷、违反的契约、预期行为和需要重跑的检查；相同精确
+失败不原样重试。MODE、目标、授权或环境变化必须新 conversation；独立验收必须
+新 conversation。
+
+最终需同时检查 compact final、Agy 与 reducer 两个退出码、实际工作树/Git diff、
+TASK.md 要求和逐项证据，并区分用户已有改动、任务临时文件和 Agy 新增变化。
+`SUCCESS`、conversation id、文件存在或非空 response 都不是完成证明。
