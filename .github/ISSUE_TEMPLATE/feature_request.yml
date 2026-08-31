@@ -6,9 +6,11 @@ labels:
 body:
 - type: markdown
   attributes:
-    value: "Thank you for suggesting a feature or improvement!\nPlease note that gemini-help-me\
-      \ is intentionally designed to be **plugin-free**, relying only on native \a\
-      gy CLI calls without companion services, daemons, or runtime sidecars."
+    value: 'Thank you for suggesting a feature or improvement!
+
+      Please note that `gemini-help-me` is intentionally designed to be **plugin-free**,
+      relying only on native Agy CLI calls without companion services, daemons, or
+      runtime sidecars.'
 - type: textarea
   id: problem-statement
   attributes:

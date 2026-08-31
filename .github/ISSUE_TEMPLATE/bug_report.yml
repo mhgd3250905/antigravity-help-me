@@ -10,9 +10,8 @@ body:
       to help us reproduce and fix it.
 
       **Security Notice**: If you have discovered a security vulnerability or credential
-      handling issue, please do **NOT** open a public issue. Follow our [Security
-      Policy](https://github.com/mhgd3250905/gemini-help-me/security/policy) in SECURITY.md
-      to report it privately.'
+      handling issue, please do NOT open a public issue. Follow our [Security Policy](https://github.com/mhgd3250905/gemini-help-me/security/policy)
+      in `SECURITY.md` to report it privately.'
 - type: input
   id: host-agent
   attributes:
@@ -35,8 +34,8 @@ body:
   id: agy-version
   attributes:
     label: Agy CLI Version
-    description: "Run \agy --version in your terminal and paste the exact version\
-      \ string."
+    description: Run `agy --version` in your terminal and paste the exact version
+      string.
     placeholder: e.g., agy 1.1.22
   validations:
     required: true
@@ -44,7 +43,7 @@ body:
   id: gemini-model
   attributes:
     label: Gemini Model
-    description: 'Model specified in invocation (Default: gemini-3.7-flash-high)'
+    description: 'Model specified in invocation (Default: `gemini-3.7-flash-high`)'
     placeholder: gemini-3.7-flash-high
     value: gemini-3.7-flash-high
   validations:
@@ -56,7 +55,7 @@ body:
     description: Describe step-by-step how to reproduce the issue.
     placeholder: '1. Defined TASK.md with MODE: REVIEW
 
-      2. Dispatched native agy command
+      2. Dispatched native Agy command
 
       3. Observed error output'
   validations:
@@ -82,8 +81,8 @@ body:
   attributes:
     label: Pre-submission Checks
     options:
-    - label: "I have verified that \agy is installed, logged in, and \agy models lists\
-        \ gemini-3.7-flash-high."
+    - label: I have verified that `agy` is installed, logged in, and `agy models`
+        lists `gemini-3.7-flash-high`.
       required: true
     - label: I have confirmed this is not a security vulnerability (or have reported
         it privately via SECURITY.md).

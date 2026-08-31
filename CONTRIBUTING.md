@@ -1,6 +1,6 @@
 # Contributing to Gemini Help Me
 
-Thank you for your interest in improving gemini-help-me! We welcome contributions that uphold the core principles of simplicity, reliability, and security.
+Thank you for your interest in improving `gemini-help-me`! We welcome contributions that uphold the core principles of simplicity, reliability, and security.
 
 ---
 
@@ -10,14 +10,14 @@ Before submitting changes, please ensure your contribution aligns with the proje
 
 1. **Plugin-Free Architecture**:
    - Zero runtime daemons, companion background services, Node.js/Python wrappers, or MCP sidecars.
-   - All execution relies strictly on the native, headless gy CLI executed from the host Agent's built-in terminal.
+   - All execution relies strictly on the native, headless `agy` CLI executed from the host Agent's built-in terminal.
 
 2. **File-Based Task Contract (TASK.md)**:
-   - Tasks are articulated in .gemini-help-me/tasks/<task-id>/TASK.md.
-   - The CLI prompt passed in rgv is fixed and minimal to eliminate shell quoting hazards, command line length limits, and prompt injection vulnerabilities.
+   - Tasks are articulated in `.gemini-help-me/tasks/<task-id>/TASK.md`.
+   - The CLI prompt passed in `argv` is fixed and minimal to eliminate shell quoting hazards, command line length limits, and prompt injection vulnerabilities.
 
 3. **Explicit Model Selection & Fail-Fast**:
-   - Fixed to gemini-3.7-flash-high.
+   - Fixed to `gemini-3.7-flash-high`.
    - No silent fallbacks or implicit model switching. If the target model or CLI is unavailable, fail immediately with clear diagnostic logs.
 
 4. **Clear Separation of Duties**:
@@ -30,15 +30,15 @@ Before submitting changes, please ensure your contribution aligns with the proje
 
 ### 1. Reporting Issues
 - Use the [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml) template.
-- Include your operating system, host agent (Codex, Claude Code, etc.), gy --version, and exact error logs.
+- Include your operating system, host agent (Codex, Claude Code, etc.), `agy --version`, and exact error logs.
 - For security vulnerabilities, **do not** file a public issue; see [SECURITY.md](SECURITY.md).
 
 ### 2. Suggesting Features
 - Use the [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) template.
-- Ensure the proposed feature maintains the plugin-free and native gy CLI approach.
+- Ensure the proposed feature maintains the plugin-free and native Agy CLI approach.
 
 ### 3. Submitting Pull Requests
-1. Fork the repository and create your branch from main.
+1. Fork the repository and create your branch from `main`.
 2. Keep changes focused and adhere to existing Markdown formatting and YAML standards.
 3. Validate your changes locally (see below).
 4. Ensure no absolute personal paths, secrets, tokens, or temporary files are included.
@@ -50,16 +50,16 @@ Before submitting changes, please ensure your contribution aligns with the proje
 
 Before submitting a PR, validate the skill definition using the standard skill validator:
 
-`ash
+```bash
 # On Linux/macOS
 python <path-to-skill-creator>/scripts/quick_validate.py .
 
 # On Windows PowerShell (ensuring UTF-8 parsing)
 $env:PYTHONUTF8=1; python <path-to-skill-creator>/scripts/quick_validate.py .; Remove-Item Env:\PYTHONUTF8
-`
+```
 
 Verify that:
 - [SKILL.md](SKILL.md) passes all frontmatter formatting and length checks.
-- All relative links to eferences/*.md are valid and resolve correctly.
-- gents/openai.yaml remains valid YAML.
+- All relative links to `references/*.md` are valid and resolve correctly.
+- `agents/openai.yaml` remains valid YAML.
 - No personal file paths or system-specific artifacts are committed.

@@ -11,7 +11,7 @@
 
 ## Reporting a Vulnerability
 
-We take the security of gemini-help-me seriously. If you discover a security vulnerability, please do **NOT** open a public issue.
+We take the security of `gemini-help-me` seriously. If you discover a security vulnerability, please do **NOT** open a public issue.
 
 Instead, please report it via one of the following methods:
 - **GitHub Private Vulnerability Reporting**: Submit a private advisory report directly via [GitHub Security Advisories](https://github.com/mhgd3250905/gemini-help-me/security/advisories/new).
@@ -29,10 +29,10 @@ We will acknowledge receipt of your report promptly and coordinate disclosure re
 
 ## Security Model & Boundaries
 
-gemini-help-me coordinates tasks between a **Host Agent** and the native **Agy CLI**. Understanding the trust boundary is essential for secure operation:
+`gemini-help-me` coordinates tasks between a **Host Agent** and the native **Agy CLI**. Understanding the trust boundary is essential for secure operation:
 
-1. **--dangerously-skip-permissions is Not a Security Sandbox**:
-   - The --dangerously-skip-permissions flag allows headless gy to invoke tools without interactive confirmation prompts.
+1. **`--dangerously-skip-permissions` is Not a Security Sandbox**:
+   - The `--dangerously-skip-permissions` flag allows headless `agy` to invoke tools without interactive confirmation prompts.
    - It does **not** restrict filesystem or network access.
    - Security boundaries and user authorizations must be actively enforced by the **Host Agent** before dispatching commands.
 
@@ -42,7 +42,7 @@ gemini-help-me coordinates tasks between a **Host Agent** and the native **Agy C
    - See [references/permissions.md](references/permissions.md) for detailed guidelines.
 
 3. **Prompt Injection Mitigation**:
-   - By using a fixed, short prompt in the CLI invocation and isolating task requirements in a local TASK.md contract file, the skill prevents arbitrary command line injection and unescaped variable expansion in host shells (such as PowerShell or Bash).
+   - By using a fixed, short prompt in the CLI invocation and isolating task requirements in a local `TASK.md` contract file, the skill prevents arbitrary command line injection and unescaped variable expansion in host shells (such as PowerShell or Bash).
 
 4. **No Privilege Elevation or Credential Modification**:
-   - gemini-help-me never attempts to alter global system PATH, edit shell profiles, tamper with OAuth tokens in ~/.gemini, or bypass host sandbox constraints.
+   - `gemini-help-me` never attempts to alter global system PATH, edit shell profiles, tamper with OAuth tokens in `~/.gemini`, or bypass host sandbox constraints.
