@@ -23,12 +23,29 @@ Gemini Flash High 擅长快速完成确定任务，不代替主会话作开放�
 
 每个 TASK.md 只保留当前阶段需要的事实。后续任务引用已验收结论，不复制完整历史。
 
+## 发布准备的顺序
+
+发布相关动作由宿主会话持有，不能倒置 readiness gate：
+
+1. 先由宿主物化当前版本要求的 `VERSION`、README、`SECURITY.md` 等发布文件；
+2. 再启动只读 readiness/release gate，检查这些文件、测试和工作树状态；
+3. readiness 通过后，才由宿主创建 tag、推送远端或执行其他发布动作。
+
+如果当前 TASK.md 只是实现审查或代码审查，后续仍未执行的发布动作不是当前 blocker，
+不得把“将来要创建 VERSION/README/tag”写成 Agy 的现状缺陷。需要同时改实现和发布文件
+时拆成先物化发布文件、后 readiness 审查的两个窄任务；Agy 只能检查主会话已经提供
+的事实和产物。
+
 ## 消除模糊表达
 
 - “优化体验”改成具体用户路径、目标行为和验证方式。
 - “全面研究”改成有限问题、证据入口和返回格式。
 - “整理代码”改成具体缺陷、目标行为、文件范围和测试。
 - “你决定”改成主会话已选方案；只允许 Agy 决定不影响契约的局部实现细节。
+- 对本地审查列出读取/检查 allowlist（精确路径或有限模式），并为每个工具写明最大
+  调用次数；达到预算或发现首个足以判定的阻塞后停止，不继续无边界浏览。Agy CLI
+  1.1.22 没有 `--max-turns`，这些 allowlist、工具预算和停止条件只是 prompt-level
+  约束；宿主通过 compact supervision 判断超限并停止或创建窄范围返修任务。
 - 返回形状固定为 schema 的 `task_id`、`outcome`、`summary`、`reason`、`missing`、
   `next_steps`、`evidence`；`blocked` 必须说明具体原因，禁止只返回裸 `BLOCKED`。
 

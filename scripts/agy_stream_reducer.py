@@ -33,7 +33,11 @@ MAX_TOOL_NAMES = 8
 MAX_REQUIRED_TOOLS = 12
 EXECUTION_PROFILES = ("REVIEW_LOCAL", "REVIEW_EXTERNAL", "CHANGE")
 MAX_INPUT_LINE_BYTES = 1024 * 1024
-FINAL_RESERVE_BYTES = 320
+MAX_CLI_ERROR_REASON_CHARS = 1000
+# Progress is deliberately stopped with a generous reservation for the
+# terminal result.  A terminal result has semantic priority over live phase
+# updates: once emitted, progress cannot be retracted from stdout.
+FINAL_RESERVE_BYTES = 1024
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 
 
@@ -70,7 +74,17 @@ def _compact_text(value: Any, limit: int = MAX_FIELD_CHARS) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    value = " ".join(value.replace("\x00", "").split())
+    cleaned: List[str] = []
+    for character in value:
+        codepoint = ord(character)
+        if character in "\t\n\r\v\f":
+            cleaned.append(" ")
+        elif codepoint < 32 or codepoint == 127 or 0x80 <= codepoint <= 0x9F:
+            # Do not let control-only values survive into semantic fields.
+            continue
+        else:
+            cleaned.append(character)
+    value = " ".join("".join(cleaned).split())
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 1)].rstrip() + "…"
@@ -150,7 +164,7 @@ def _extract_tool_name(event: Dict[str, Any]) -> Optional[str]:
         value = event.get(key)
         if value:
             return _safe_tool_name(value)
-    for key in ("tool_call", "tool_use", "function_call", "function"):
+    for key in ("tool_call", "tool_use", "function_call", "function", "tool_info"):
         value = event.get(key)
         if isinstance(value, dict):
             value = value.get("name") or value.get("tool") or value.get("function")
@@ -158,6 +172,59 @@ def _extract_tool_name(event: Dict[str, Any]) -> Optional[str]:
                 value = value.get("name")
             if value:
                 return _safe_tool_name(value)
+    return None
+
+
+_TOOL_ID_KEYS = (
+    "tool_call_id",
+    "toolCallId",
+    "tool_use_id",
+    "toolUseId",
+    "invocation_id",
+    "invocationId",
+    "call_id",
+    "callId",
+)
+
+
+def _identity_value(value: Any, limit: int = 180) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    if not isinstance(value, (int, str)):
+        return ""
+    return _compact_text(value, limit)
+
+
+def _explicit_tool_call_id(event: Dict[str, Any]) -> str:
+    for key in _TOOL_ID_KEYS:
+        value = _identity_value(event.get(key))
+        if value:
+            return value
+    for container_name in ("tool_call", "tool_use", "function_call", "function", "tool_info"):
+        container = event.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for key in (*_TOOL_ID_KEYS, "id"):
+            value = _identity_value(container.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _extract_tool_invocation_identity(event: Dict[str, Any], tool: str) -> Optional[Tuple[str, ...]]:
+    """Find a stable invocation key; absent identity deliberately disables dedupe."""
+    step_value = _get_nested(event, "step_index", "stepIndex")
+    step_index = _identity_value(step_value, 64)
+    if step_index:
+        conversation = _identity_value(
+            _get_nested(event, "conversation_id", "conversationId", "session_id", "sessionId"),
+            180,
+        ) or "<stream>"
+        return ("step", conversation, step_index, tool)
+
+    call_id = _explicit_tool_call_id(event)
+    if call_id:
+        return ("call", call_id, tool)
     return None
 
 
@@ -172,6 +239,40 @@ def _extract_structured_output(event: Dict[str, Any]) -> Optional[Dict[str, Any]
             return None
         return parsed if isinstance(parsed, dict) else None
     return None
+
+
+def _explicit_error_text(value: Any) -> str:
+    """Return only an explicitly labelled error string, never arbitrary output."""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return ""
+    for key in ("error", "message", "reason", "detail"):
+        child = value.get(key)
+        if isinstance(child, str) and child.strip():
+            return child
+    return ""
+
+
+def _extract_cli_error_reason(event: Dict[str, Any]) -> Optional[str]:
+    """Extract a bounded diagnostic without forwarding raw CLI/tool output."""
+    reason = _explicit_error_text(event.get("error"))
+    if not reason:
+        response = event.get("response")
+        if isinstance(response, dict):
+            reason = _explicit_error_text(response.get("error"))
+            if not reason:
+                response_status = _compact_text(response.get("status"), 64).upper()
+                if response_status in {"ERROR", "FAILED", "FAILURE"}:
+                    reason = _explicit_error_text(response)
+        elif isinstance(response, str) and re.match(
+            r"^\s*(?:(?:error|failed|failure)\b\s*[:=-]|\binvalid model selection\b)",
+            response,
+            flags=re.IGNORECASE,
+        ):
+            reason = response
+    compacted = _compact_text(reason, MAX_CLI_ERROR_REASON_CHARS)
+    return compacted or None
 
 
 def _expanded_command_names(event: Dict[str, Any]) -> set:
@@ -220,6 +321,7 @@ class Reducer:
         self.malformed_count = 0
         self.init_error: Optional[str] = "init_not_seen"
         self.tool_counts: Counter = Counter()
+        self.tool_invocations: set = set()
         self.recent: Deque[Dict[str, Any]] = deque(maxlen=DEFAULT_RECENT_EVENTS)
         self.raw_lines: Deque[bytes] = deque()
         self.raw_size = 0
@@ -296,36 +398,141 @@ class Reducer:
     def _encode(self, payload: Dict[str, Any]) -> bytes:
         return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
+    def _output_budget(self) -> int:
+        # Keep a practical minimum so even a highly compact terminal event can
+        # retain its protocol, outcome, task id, and required result fields.
+        return max(512, self.args.max_output_bytes)
+
+    @staticmethod
+    def _terminal_text(value: Any, limit: int, fallback: str = "truncated") -> str:
+        text = _compact_text(value, limit)
+        return text or fallback
+
+    @classmethod
+    def _terminal_list(cls, value: Any, item_limit: int, item_count: int) -> List[str]:
+        if not isinstance(value, list):
+            return ["truncated"]
+        result = [
+            cls._terminal_text(item, item_limit)
+            for item in value[:item_count]
+        ]
+        return result or ["truncated"]
+
+    def _compact_terminal(self, payload: Dict[str, Any], available: int) -> Optional[Dict[str, Any]]:
+        """Return the richest deterministic terminal payload that fits.
+
+        The initial payload is already compacted for normal output.  When the
+        remaining stdout budget is smaller, optional context is removed first,
+        then list cardinality and field lengths are reduced in a fixed order.
+        Required semantic fields are never removed for a valid blocked or
+        completed result.  The ``truncated`` marker tells the host that the
+        state file/raw log should be consulted for fuller details.
+        """
+        protocol = payload.get("protocol")
+        outcome = payload.get("outcome")
+        if protocol == "blocked" and outcome == "blocked":
+            # Prefer preserving more list entries before shortening their
+            # values.  All candidates retain the first item of every required
+            # list, even at the smallest supported budget.
+            for text_limit in (320, 240, 180, 120, 80, 64, 48, 32, 24, 16, 8, 4, 1):
+                for item_count in (3, 2, 1):
+                    candidate = {
+                        "event": "final",
+                        "task_id": self.task_id,
+                        "protocol": "blocked",
+                        "outcome": "blocked",
+                        "reason": self._terminal_text(payload.get("reason"), text_limit),
+                        "missing": self._terminal_list(payload.get("missing"), text_limit, item_count),
+                        "next_steps": self._terminal_list(payload.get("next_steps"), text_limit, item_count),
+                        "evidence": self._terminal_list(payload.get("evidence"), text_limit, item_count),
+                        "truncated": True,
+                    }
+                    if len(self._encode(candidate)) <= available:
+                        return candidate
+            return None
+
+        if protocol == "completed" and outcome == "completed":
+            for text_limit in (320, 240, 180, 120, 80, 64, 48, 32, 24, 16, 8, 4, 1):
+                for item_count in (3, 2, 1):
+                    candidate = {
+                        "event": "final",
+                        "task_id": self.task_id,
+                        "protocol": "completed",
+                        "outcome": "completed",
+                        "summary": self._terminal_text(payload.get("summary"), text_limit),
+                        "evidence": self._terminal_list(payload.get("evidence"), text_limit, item_count),
+                        "truncated": True,
+                    }
+                    if len(self._encode(candidate)) <= available:
+                        return candidate
+            return None
+
+        # Protocol errors have no schema result fields to preserve.  Retain
+        # the actual diagnostic code and, when available, a bounded reason;
+        # drop optional context only after those diagnostics.
+        code = self._terminal_text(payload.get("code"), 120, "invalid_result")
+        reason = _compact_text(payload.get("reason"), MAX_FIELD_CHARS)
+        for reason_limit in (MAX_FIELD_CHARS, 240, 180, 120, 80, 64, 48, 32, 24, 16, 8, 4, 1):
+            candidate = {
+                "event": "final",
+                "task_id": self.task_id,
+                "protocol": "protocol_error",
+                "code": code,
+                "truncated": True,
+            }
+            if reason:
+                candidate["reason"] = self._terminal_text(reason, reason_limit)
+            if len(self._encode(candidate)) <= available:
+                return candidate
+        candidate = {
+            "event": "final",
+            "task_id": self.task_id,
+            "protocol": "protocol_error",
+            "code": "invalid_result",
+            "truncated": True,
+        }
+        if len(self._encode(candidate)) <= available:
+            return candidate
+        return None
+
+    def _emit_terminal(self, payload: Dict[str, Any]) -> bool:
+        budget = self._output_budget()
+        available = budget - self.output_bytes
+        encoded = self._encode(payload)
+        if len(encoded) > available:
+            compacted = self._compact_terminal(payload, available)
+            if compacted is None:
+                # The progress reservation guarantees this is unreachable for
+                # supported budgets.  Never rewrite a valid terminal semantic
+                # into output_budget_exceeded; preserve the original protocol
+                # in the state file and leave stdout untouched if impossible.
+                return False
+            payload = compacted
+            encoded = self._encode(payload)
+        if len(encoded) > available:
+            return False
+        sys.stdout.buffer.write(encoded)
+        sys.stdout.buffer.flush()
+        self.output_bytes += len(encoded)
+        self.update_count += 1
+        return True
+
     def _emit(self, payload: Dict[str, Any], *, force: bool = False) -> bool:
         """Print a compact event, respecting count and byte budgets."""
         is_final = payload.get("event") == "final"
-        reserve = 0 if is_final else 1  # Keep room for the terminal event.
-        if not force and self.update_count >= max(1, self.args.max_updates) - reserve:
+        if is_final:
+            return self._emit_terminal(payload)
+        # Keep one update slot for the terminal event.  The byte reservation
+        # below is independent of the count limit and has higher priority.
+        if not force and self.update_count >= max(1, self.args.max_updates) - 1:
             return False
 
         encoded = self._encode(payload)
-        budget = max(512, self.args.max_output_bytes)
-        if not is_final and not force and self.output_bytes + len(encoded) > budget - FINAL_RESERVE_BYTES:
+        budget = self._output_budget()
+        if not force and self.output_bytes + len(encoded) > budget - FINAL_RESERVE_BYTES:
             return False
         if self.output_bytes + len(encoded) > budget:
-            if not is_final and not force:
-                return False
-            # Final output is still useful when prior optional events consumed
-            # the budget; reduce it to a minimal, non-sensitive record.
-            minimal = self._safe_event(
-                "final",
-                protocol=payload.get("protocol", "protocol_error"),
-                outcome=payload.get("outcome"),
-                code=payload.get("code", "output_budget_exceeded"),
-            )
-            encoded = self._encode(minimal)
-            if len(encoded) > budget:
-                minimal = {"event": "final", "task_id": self.task_id, "protocol": "protocol_error", "code": "output_budget_exceeded"}
-                encoded = self._encode(minimal)
-            # Do not exceed the advertised output budget.  Non-final events
-            # reserve room for this compact terminal record.
-            if self.output_bytes + len(encoded) > budget:
-                return False
+            return False
         sys.stdout.buffer.write(encoded)
         sys.stdout.buffer.flush()
         self.output_bytes += len(encoded)
@@ -358,6 +565,11 @@ class Reducer:
             "verified": self.init_workspace_verified,
             "reason": self.init_workspace_reason,
         }
+        if self.final_data:
+            self.state["final"] = {
+                "protocol": self.final_protocol,
+                **self.final_data,
+            }
         try:
             self.state["status"] = self.final_protocol or "running"
             if self.args.state:
@@ -370,6 +582,14 @@ class Reducer:
             self._add_recent("state_write_failed")
 
     def _emit_init(self, event: Dict[str, Any]) -> None:
+        if self.init_seen:
+            # init binds the process exactly once.  A later event must not be
+            # able to repair an earlier workspace/profile/capability failure,
+            # nor silently replace the identity already recorded in state.
+            self.init_error = "duplicate_init"
+            self._add_recent("duplicate_init")
+            self._emit(self._safe_event("warning", code="duplicate_init"))
+            return
         self.init_seen = True
         self.init_cwd = _normalise_path(event.get("cwd"))
         self.conversation_id = _compact_text(
@@ -483,17 +703,44 @@ class Reducer:
 
     def _handle_step(self, event: Dict[str, Any], now: float) -> None:
         phase = _extract_phase(event)
-        if phase and phase != self.last_phase:
-            self.last_phase = phase
-            tool = _extract_tool_name(event)
-            if tool:
+        tool = _extract_tool_name(event)
+        new_invocation = False
+        stable_identity = False
+        if tool:
+            identity_event = event
+            if self.conversation_id and not _identity_value(
+                _get_nested(event, "conversation_id", "conversationId", "session_id", "sessionId"),
+                180,
+            ):
+                # Some envelopes put the conversation id only on init.  Use
+                # that process binding for a step-index key, but never invent
+                # an identity when both the binding and step/call id are absent.
+                identity_event = dict(event)
+                identity_event["conversation_id"] = self.conversation_id
+            identity = _extract_tool_invocation_identity(identity_event, tool)
+            if identity is None:
+                # Compatibility envelopes without a step/call identity are
+                # treated as separate observations.  Merging them by tool
+                # name would undercount distinct real calls.
+                new_invocation = True
+            elif identity not in self.tool_invocations:
+                self.tool_invocations.add(identity)
+                new_invocation = True
+                stable_identity = True
+            if new_invocation:
                 self.tool_counts[tool] += 1
+
+        phase_changed = bool(phase and phase != self.last_phase)
+        if phase_changed:
+            self.last_phase = phase
             self._add_recent("phase", phase=phase, tool=tool or "")
             self._emit(self._safe_event("phase", phase=phase, tool=tool, count=self.tool_counts.get(tool, 0) if tool else None))
-        else:
-            tool = _extract_tool_name(event)
-            if tool:
-                self.tool_counts[tool] += 1
+        elif new_invocation and stable_identity and phase == "tools":
+            # A new invocation may follow another tool invocation without an
+            # intervening non-tool phase.  Report that count once, while
+            # suppressing ACTIVE/DONE/ERROR updates for the same identity.
+            self._add_recent("phase", phase=phase, tool=tool or "")
+            self._emit(self._safe_event("phase", phase=phase, tool=tool, count=self.tool_counts.get(tool, 0)))
         self._maybe_heartbeat(now)
 
     def _handle_warning(self, event: Dict[str, Any]) -> None:
@@ -513,7 +760,11 @@ class Reducer:
         if isinstance(response, str) and response.strip().upper() == "BLOCKED" and structured is None:
             return "protocol_error", {"code": "bare_blocked"}
         if status and status not in {"SUCCESS", "BLOCKED"}:
-            return "protocol_error", {"code": "cli_status", "status": status}
+            data: Dict[str, Any] = {"code": "cli_status", "status": status}
+            reason = _extract_cli_error_reason(event)
+            if reason:
+                data["reason"] = reason
+            return "protocol_error", data
         if structured is None:
             return "protocol_error", {"code": "missing_structured_output"}
 
@@ -531,11 +782,14 @@ class Reducer:
         outcome = structured.get("outcome")
         if outcome not in {"completed", "blocked"}:
             return "protocol_error", {"code": "invalid_outcome"}
-        if not isinstance(structured.get("summary"), str) or not 1 <= len(structured["summary"]) <= 2000 or not structured["summary"].strip():
+        summary = _compact_text(structured.get("summary"), 2000)
+        if not isinstance(structured.get("summary"), str) or not 1 <= len(structured["summary"]) <= 2000 or not summary:
             return "protocol_error", {"code": "empty_summary"}
         if not isinstance(structured.get("reason"), str) or len(structured["reason"]) > 2000:
             return "protocol_error", {"code": "invalid_reason"}
+        reason = _compact_text(structured.get("reason"), 2000)
         list_limits = {"missing": 10, "next_steps": 10, "evidence": 20}
+        cleaned_lists: Dict[str, List[str]] = {}
         for field, max_items in list_limits.items():
             if not isinstance(structured.get(field), list):
                 return "protocol_error", {"code": "invalid_" + field}
@@ -543,24 +797,33 @@ class Reducer:
                 return "protocol_error", {"code": "too_many_" + field}
             if any(not isinstance(item, str) or len(item) > 500 for item in structured[field]):
                 return "protocol_error", {"code": "invalid_" + field + "_item"}
+            cleaned_lists[field] = []
+            for item in structured[field]:
+                cleaned_item = _compact_text(item, 500)
+                if not cleaned_item:
+                    return "protocol_error", {"code": "empty_" + field + "_item"}
+                cleaned_lists[field].append(cleaned_item)
         if outcome == "blocked":
-            if not structured["reason"].strip():
+            if not reason:
                 return "protocol_error", {"code": "blocked_reason_empty"}
-            if not structured["missing"]:
+            if not cleaned_lists["missing"]:
                 return "protocol_error", {"code": "blocked_missing_empty"}
-            if not structured["next_steps"]:
+            if not cleaned_lists["next_steps"]:
                 return "protocol_error", {"code": "blocked_next_steps_empty"}
-            if not structured["evidence"]:
+            if not cleaned_lists["evidence"]:
                 return "protocol_error", {"code": "blocked_evidence_empty"}
-        elif not structured["evidence"]:
+        elif not cleaned_lists["evidence"]:
             return "protocol_error", {"code": "completed_evidence_empty"}
         return "completed", {
             "outcome": outcome,
-            "summary": _compact_text(structured.get("summary")),
-            "reason": _compact_text(structured.get("reason")),
-            "missing": _compact_list(structured.get("missing")),
-            "next_steps": _compact_list(structured.get("next_steps")),
-            "evidence": _compact_list(structured.get("evidence")),
+            # Keep the validated result at schema bounds for state.json.  The
+            # stdout terminal is compacted separately according to the bytes
+            # still available, so state remains the fuller diagnostic source.
+            "summary": summary,
+            "reason": reason,
+            "missing": cleaned_lists["missing"],
+            "next_steps": cleaned_lists["next_steps"],
+            "evidence": cleaned_lists["evidence"],
         }
 
     @staticmethod
@@ -593,47 +856,48 @@ class Reducer:
         if self.final_protocol == "blocked":
             self.state["status"] = "blocked"
             self._add_recent("blocked", reason=data.get("reason", ""))
-            self._emit(
-                self._safe_event(
-                    "final",
-                    protocol="blocked",
-                    outcome="blocked",
-                    reason=_compact_text(data.get("reason"), 180),
-                    missing=self._final_list(data.get("missing")),
-                    next_steps=self._final_list(data.get("next_steps")),
-                    evidence=self._final_list(data.get("evidence")),
-                    conversation_id=self.conversation_id,
-                ),
-                force=True,
+            final_payload = self._safe_event(
+                "final",
+                protocol="blocked",
+                outcome="blocked",
+                reason=_compact_text(data.get("reason"), 180),
+                missing=self._final_list(data.get("missing")),
+                next_steps=self._final_list(data.get("next_steps")),
+                evidence=self._final_list(data.get("evidence")),
+                conversation_id=self.conversation_id,
             )
+            if any(final_payload.get(field) != data.get(field) for field in ("reason", "missing", "next_steps", "evidence")):
+                final_payload["truncated"] = True
+            self._emit(final_payload, force=True)
         elif self.final_protocol == "completed":
             self.state["status"] = "completed"
             self._add_recent("completed", outcome=data.get("outcome", "completed"))
-            self._emit(
-                self._safe_event(
-                    "final",
-                    protocol="completed",
-                    outcome=data.get("outcome"),
-                    summary=_compact_text(data.get("summary"), 240),
-                    evidence=self._final_list(data.get("evidence")),
-                    conversation_id=self.conversation_id,
-                ),
-                force=True,
+            final_payload = self._safe_event(
+                "final",
+                protocol="completed",
+                outcome=data.get("outcome"),
+                summary=_compact_text(data.get("summary"), 240),
+                evidence=self._final_list(data.get("evidence")),
+                conversation_id=self.conversation_id,
             )
+            if any(final_payload.get(field) != data.get(field) for field in ("summary", "evidence")):
+                final_payload["truncated"] = True
+            self._emit(final_payload, force=True)
         else:
             self.state["status"] = "protocol_error"
             self._add_recent("protocol_error", code=data.get("code", "invalid_result"))
-            self._emit(
-                self._safe_event(
-                    "final",
-                    protocol="protocol_error",
-                    code=data.get("code", "invalid_result"),
-                    fields=data.get("fields"),
-                    recent=list(self.recent),
-                    conversation_id=self.conversation_id,
-                ),
-                force=True,
+            final_payload = self._safe_event(
+                "final",
+                protocol="protocol_error",
+                code=data.get("code", "invalid_result"),
+                reason=data.get("reason"),
+                fields=data.get("fields"),
+                recent=list(self.recent),
+                conversation_id=self.conversation_id,
             )
+            if data.get("reason") and final_payload.get("reason") != data.get("reason"):
+                final_payload["truncated"] = True
+            self._emit(final_payload, force=True)
         self._update_state()
 
     def process(self, event: Dict[str, Any]) -> None:
@@ -654,6 +918,12 @@ class Reducer:
             return
         if event_type in {"step_update", "step", "progress", "tool_call", "tool_use"}:
             payload = event.get(event_type)
+            if isinstance(payload, dict):
+                payload = dict(payload)
+                if not any(key in payload for key in ("conversation_id", "conversationId", "session_id", "sessionId")):
+                    conversation_id = _get_nested(event, "conversation_id", "conversationId", "session_id", "sessionId")
+                    if conversation_id is not None:
+                        payload["conversation_id"] = conversation_id
             self._handle_step(payload if isinstance(payload, dict) else event, now)
             self._update_state()
             return
@@ -714,12 +984,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _read_stdin(input_queue: "queue.Queue[Optional[bytes]]") -> None:
     pending = bytearray()
+    discard_until_newline = False
+
+    def enqueue_line(raw: bytes) -> None:
+        # Check the complete NDJSON line, including its newline, before it can
+        # enter the processing queue.  A line may cross several os.read chunks;
+        # checking only ``pending`` before finding a later newline lets an
+        # oversized complete JSON event bypass the input bound.
+        if len(raw) > MAX_INPUT_LINE_BYTES:
+            input_queue.put(b"\n")
+        else:
+            input_queue.put(raw)
+
     try:
         descriptor = sys.stdin.fileno()
         while True:
             chunk = os.read(descriptor, 64 * 1024)
             if not chunk:
                 break
+            if discard_until_newline:
+                newline = chunk.find(b"\n")
+                if newline < 0:
+                    continue
+                discard_until_newline = False
+                chunk = chunk[newline + 1 :]
+                if not chunk:
+                    continue
             pending.extend(chunk)
             while True:
                 newline = pending.find(b"\n")
@@ -727,14 +1017,17 @@ def _read_stdin(input_queue: "queue.Queue[Optional[bytes]]") -> None:
                     break
                 raw = bytes(pending[: newline + 1])
                 del pending[: newline + 1]
-                input_queue.put(raw)
+                enqueue_line(raw)
             if len(pending) > MAX_INPUT_LINE_BYTES:
                 # Emit one deliberately malformed marker without retaining or
-                # forwarding the oversized payload.
+                # forwarding the oversized payload.  Discard the remainder of
+                # the same logical line if its newline arrives in a later
+                # read; it must not be treated as a fresh JSON event.
                 input_queue.put(b"\n")
                 pending.clear()
+                discard_until_newline = True
         if pending:
-            input_queue.put(bytes(pending))
+            enqueue_line(bytes(pending))
     except (OSError, ValueError):
         # The final protocol event will explain that the stream ended without
         # a valid result; never echo an OS error or any partial raw payload.

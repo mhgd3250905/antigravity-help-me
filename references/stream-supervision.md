@@ -22,10 +22,16 @@ Read the task contract at "<ABS_TASK_PATH>" in full before acting. Execute exact
 执行配置必须明确区分：
 
 ```text
-REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
-REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
-CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
 ```
+
+每次启动都显式传 `--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy
+1.1.22 对该模型只接受省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生
+model selection conflict。成本由读取/检查 allowlist、prompt-level 工具调用预算和
+停止条件控制。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
+`--effort low|medium|high`。
 
 `--json-schema` 必须是 Agy 进程可读的绝对文件路径，推荐直接指向本技能的
 `references/result-schema.json`。任务自己的 `TASK.md` 仍应写清绝对 workspace
@@ -39,7 +45,7 @@ Windows PowerShell（以下是 `REVIEW_LOCAL` 的可执行形状；`py -3` 可�
 ```powershell
 $agyExitFile = Join-Path $taskDir 'agy-exit.txt'
 & {
-  & agy.exe --add-dir $workspace --mode plan --model gemini-3.7-flash-high --output-format stream-json --json-schema $schema --print-timeout 1800s -p $prompt 2> $stderr
+  & agy.exe --add-dir $workspace --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema $schema --print-timeout 1800s -p $prompt 2> $stderr
   [IO.File]::WriteAllText($agyExitFile, [string]$LASTEXITCODE)
 } |
   py -3 $reducer --task-id $taskId --task-mode REVIEW --execution-profile REVIEW_LOCAL --required-tool view_file --workspace $workspace --state $state --raw-log $rawLog --heartbeat-seconds 75 --max-updates 12 --max-output-bytes 2048
@@ -62,7 +68,7 @@ POSIX shell（同样以 `REVIEW_LOCAL` 为例）：
 
 ```sh
 AGY_EXIT_FILE="$TASK_DIR/agy-exit.txt"
-{ agy --add-dir "$WORKSPACE" --mode plan --model gemini-3.7-flash-high --output-format stream-json --json-schema "$SCHEMA" --print-timeout 1800s -p "$PROMPT" 2>"$STDERR"; printf '%s\n' "$?" >"$AGY_EXIT_FILE"; } |
+{ agy --add-dir "$WORKSPACE" --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema "$SCHEMA" --print-timeout 1800s -p "$PROMPT" 2>"$STDERR"; printf '%s\n' "$?" >"$AGY_EXIT_FILE"; } |
   python3 "$REDUCER" --task-id "$TASK_ID" --task-mode REVIEW --execution-profile REVIEW_LOCAL --required-tool view_file --workspace "$WORKSPACE" --state "$STATE" --raw-log "$RAW_LOG" --heartbeat-seconds 75 --max-updates 12 --max-output-bytes 2048
 REDUCER_EXIT=$?
 AGY_EXIT=$(cat "$AGY_EXIT_FILE")
@@ -84,12 +90,18 @@ AGY_EXIT=$(cat "$AGY_EXIT_FILE")
   `/plan` 是否实际展开、简化后的模型、权限模式和 conversation id；不把任意
   nested metadata 当作目录绑定证明。显式 resume/project/permission expectation
   与 init 不符时 fail-closed。
-- `phase`：只报告阶段变化；同一工具调用计数聚合，最多保留 8 个工具名。
+- `phase`：只报告阶段变化和新工具 invocation；同一 invocation 的 ACTIVE/DONE/
+  ERROR/update 不重复输出，最多保留 8 个工具名。`count` 与 heartbeat/state.tools
+  表示按 `conversation_id + step_index + tool_name`（或明确 tool-call id）去重后的
+  unique invocation 数，而不是 stream event 数；没有稳定 identity 时按每次观察
+  保守计数，避免把不同调用错误合并。
 - `warning`：只报告稳定的类别码，不转发 warning 的正文。
 - `heartbeat`：默认 75 秒限频，显示阶段、经过时间和聚合计数；reducer 使用独立
   的本地 timer，即使 stdin 在等待 Agy 时静默也会发出 heartbeat。
-- `final`：只报告经 schema 和 task id 校验后的 `completed` 或 `blocked`；
-  最多保留三个有意义的近期事件用于协议错误诊断。
+- `final`：只报告经 schema 和 task id 校验后的 `completed`、`blocked` 或
+  `protocol_error`；最多保留三个有意义的近期事件用于协议错误诊断。CLI
+  `ERROR`/`FAILED` 等状态若带可信 `result.error`（或明确标记为错误的 `response`），
+  还会保留经控制字符清洗和长度限制的 `reason`，不转发 raw/tool output。
 
 ### 能力预检
 
@@ -119,6 +131,14 @@ Agy 应立即结构化 `blocked`，宿主不得把“工具在列表中”当作
 malformed stream fail-closed；`--state` 只写最新 compact state。上述文件属于
 宿主上下文之外的运行证据。
 
+终态优先于进度：reducer 为终态预留约 1 KiB，预算不足时先停止后续 init/phase/
+heartbeat 事件，不会用进度挤掉终态。合法 `blocked` 必须继续输出
+`protocol`、`outcome`、`reason`、`missing`、`next_steps`、`evidence`，合法
+`completed` 必须继续输出 `protocol`、`outcome`、`summary`、`evidence`。若剩余
+预算仍不足，按固定顺序减少列表项和文本长度，保留首项/首段并添加
+`"truncated": true`；不得把合法终态改写成 `output_budget_exceeded` 或
+`protocol_error`。`state.json` 保留比 stdout 更完整的终态字段。
+
 最终 `event=final` 的 `protocol` 值含义：
 
 - `completed`：结构化对象完整、task id 匹配、`outcome=completed` 且有 evidence，
@@ -126,7 +146,8 @@ malformed stream fail-closed；`--state` 只写最新 compact state。上述文�
 - `blocked`：结构化对象完整、`outcome=blocked`，且 reason、missing、
   next_steps、evidence 均非空。这是有原因的任务阻塞，不等于协议失败；
 - `protocol_error`：裸 `BLOCKED`、缺 `structured_output`、缺字段、task id 不符、
-  CLI 状态异常、workspace 未验证、execution profile/plan/resume/project 不符、
+  CLI 状态异常（若有可信错误值则在 compact final/state 中保留有界 `reason`）、
+  workspace 未验证、execution profile/plan/resume/project 不符、
   所需能力缺失/无法证明或没有 final。宿主不得验收通过。
 
 reducer 退出码为 0 仅表示收到了结构化 `completed` 或结构化 `blocked`；退出

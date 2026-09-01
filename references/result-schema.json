@@ -38,6 +38,7 @@
       "maxItems": 10,
       "items": {
         "type": "string",
+        "minLength": 1,
         "maxLength": 500
       }
     },
@@ -46,6 +47,7 @@
       "maxItems": 10,
       "items": {
         "type": "string",
+        "minLength": 1,
         "maxLength": 500
       }
     },
@@ -55,6 +57,7 @@
       "maxItems": 20,
       "items": {
         "type": "string",
+        "minLength": 1,
         "maxLength": 500
       }
     }

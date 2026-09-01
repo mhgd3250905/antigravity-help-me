@@ -16,6 +16,11 @@
 7. reducer 必须传 `--execution-profile`；显式 resume/project 还要传
    `--expected-conversation`/`--expected-project`；权限模式需要硬门禁时传当前版本已
    确认的 `--expected-permission-mode`，不能只在自然语言中声称核对过。
+8. 每次 Agy 启动都显式传 `--effort high`。技能固定模型为
+   `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
+   `high`，`low`/`medium` 会产生 model selection conflict。成本由读取/检查
+   allowlist、prompt-level 工具调用预算和停止条件控制；启动前从 `agy --help`
+   确认该 flag 和取值仍受当前版本支持。
 
 ## 运行中
 
@@ -25,11 +30,19 @@
   `scripts/agy_stream_reducer.py` 或等价的本地 reducer；不要直接显示给主模型。
 - reducer 只展示 `init`、阶段变化、warning/block、低频 heartbeat 和 final；默认
   75 秒限频、最多约 12 条、约 2 KiB。heartbeat 由独立 timer 产生，不依赖 stdin
-  持续有事件。重复工具调用按名称聚合，文本增量和完整 tool output 丢弃。
+  持续有事件。工具计数按 `conversation_id + step_index + tool_name`（或明确的
+  tool-call id）去重，因此统计的是 unique invocation 而非 stream event；没有稳定
+  identity 的兼容 envelope 按每次观察保守计数，绝不按工具名合并不同调用。文本增量
+  和完整 tool output 丢弃。
 - raw stdout 可保存为任务目录中的有界 `stream.ndjson`，compact 最新状态可保存
   为 `state.json`；两者在宿主上下文之外。stderr 单独落盘。
 - 管道必须独立保存 Agy producer 与 reducer 两个退出码；Agy 非零时，即使 reducer
   已收到合法 final 也不能验收。运行前删除任务目录中的旧退出码文件。
+- TASK.md 还应给出读取/检查 allowlist、每个工具的调用预算和停止条件。这些是
+  prompt-level 约束，不是 Agy CLI 的硬门禁：宿主仍须从 reducer 事件、raw/state 和
+  实际工作树独立验收，不能把模型遵守预算当作事实证明。
+- Agy CLI 1.1.22 没有 `--max-turns`；宿主应根据 compact supervision 判断调用/读取
+  是否超限，并停止当前 session 或创建窄范围返修任务。
 - timeout、心跳或暂时没有输出不等于失败。超过 Agy `--print-timeout` 加宿主宽限
   后才按超时处理；只停止本次技能启动且已确认身份的精确 session/PID。
 
@@ -50,6 +63,10 @@ id、MODE、授权、绝对 workspace、`--add-dir`、project 和原 conversatio
 实际 `/plan` expansion，以及显式提供的 expected conversation/project；不符即
 `protocol_error`。CHANGE 的 accept-edits argv 和授权仍由宿主依据命令记录复核。
 
+发布 readiness 的检查顺序由宿主控制：先物化 `VERSION`、README、`SECURITY.md` 等
+当前版本文件，再启动 readiness gate。后续 tag/push 不属于实现审查的当前 blocker；
+若文件尚未物化，应先结束当前审查、由宿主补齐并创建新的窄 TASK.md。
+
 ## JSON 分流与终态
 
 Agy 的 `stream-json` 终态通常是 `type=result`，应包含 `status` 和由
@@ -64,8 +81,12 @@ Agy 的 `stream-json` 终态通常是 `type=result`，应包含 `status` 和由
   `protocol=blocked`；它表示可解释的任务阻塞，不表示成功。
 
 compact final 只可携带受限 summary/证据和最多三个近期事件，不携带 response 原文、
-文本 delta 或 tool output。退出码 0 只代表收到了结构化 completed/blocked；退出码
-2 代表协议失败，任何情况下都不能只凭退出码自动验收。
+文本 delta 或 tool output。终态拥有独立预算优先级：进度事件先停，合法 `blocked`
+必须保留 `protocol`、`outcome`、`reason`、`missing`、`next_steps`、`evidence`，
+合法 `completed` 必须保留 `protocol`、`outcome`、`summary`、`evidence`。细节被
+压缩时添加 `truncated=true`，不得以 `output_budget_exceeded` 覆盖真实终态。退出码
+0 只代表收到了结构化 completed/blocked；退出码 2 代表协议失败，任何情况下都不能
+只凭退出码自动验收。
 
 若 stdout 有非 JSON 前缀，reducer 应把它视为 malformed stream 并停止验收；不要
 把前缀或 stderr 原样回灌模型。Python 不可用时改用 `--output-format json` 的

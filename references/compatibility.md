@@ -27,6 +27,11 @@
   `REVIEW_EXTERNAL` 省略 `--mode`，`CHANGE` 使用 `--mode accept-edits`。reducer
   调用同时传入与 TASK.md 一致的 `--task-mode REVIEW|CHANGE` 和相应
   `--execution-profile`；resume/project 再传 expected id 供 init 校验。
+- Agy 启动命令三个执行配置都必须显式传 `--effort high`。技能固定模型为
+  `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
+  `high`，`low`/`medium` 会产生 model selection conflict。成本由 prompt-level
+  allowlist、工具调用预算和停止条件控制。兼容性探测的 `agy --help` 必须确认
+  `--effort low|medium|high`；不支持时停止，不静默省略或替换该策略。
 - 不指定 project 时不要假设当前 cwd 就是 Agy project；若使用 `--project`，保存
   并在续接前核对明确的 project id。全局选项放在子命令之前，例如
   `agy --output-format json models`。

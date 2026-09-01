@@ -2,7 +2,7 @@
 
 > **An Agent Skill that enables your host Agent to call your local Antigravity CLI (`agy`) to complete a concrete task.**
 
-Current version: **v1.2.0**
+Current version: **v1.2.1**
 
 ---
 
@@ -19,6 +19,14 @@ events, and independently verify the structured outcome.
 2. **Bind and Execute**: Start `agy` from that workspace with `--add-dir <ABS_WORKSPACE>`, `--json-schema <ABS_SCHEMA>`, and `--output-format stream-json`.
 3. **Reduce Supervision**: Pipe raw NDJSON through `scripts/agy_stream_reducer.py`; only bounded init/phase/heartbeat/final events reach the host context.
 4. **Verify and Accept**: Independently check the schema-valid result, file diff, tests, and evidence.
+
+For release work, the host first materializes version files such as `VERSION`, README,
+and `SECURITY.md`, then runs a read-only readiness gate, and only then creates tags or
+pushes. An implementation review must not treat those future host-owned actions as a
+current blocker. Each `TASK.md` should also name its read/inspection allowlist, tool
+call budget, and stop conditions; these are prompt-level constraints, not CLI hard gates.
+Agy CLI 1.1.22 has no `--max-turns`; the host uses compact supervision to detect a
+budget overrun and stop or create a focused repair task.
 
 ## Requirements
 
@@ -61,10 +69,16 @@ The host Agent creates `.antigravity-help-me/tasks/task-001/TASK.md`, executes
 ## Stream Command Shape
 
 ```bash
-REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
-REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
-CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.7-flash-high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
+REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
+REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
+CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'
 ```
+
+每次启动都显式设置 `--effort high`。技能固定使用模型
+`gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
+`high`，`low`/`medium` 会产生 model selection conflict。成本由读取/检查 allowlist、
+prompt-level 工具调用预算和停止条件控制，而不是用冲突的 effort 值降档。实际调用前
+必须从 `agy --help` 确认当前版本支持该 flag 与 `low|medium|high` 值。
 
 Pipe stdout through `scripts/agy_stream_reducer.py` with `--task-id`, `--task-mode REVIEW|CHANGE`,
 `--execution-profile REVIEW_LOCAL|REVIEW_EXTERNAL|CHANGE`, `--workspace`, `--state`,
@@ -77,9 +91,16 @@ prompt points to the absolute `TASK.md` path and never permits bare `BLOCKED`. S
 examples, budgets, resume checks, and the final-only fallback.
 
 `--add-dir` does not change Agy's `cwd`, and no project flag may be guessed. The reducer
-requires a matching `init` binding and a schema-valid `structured_output` with
+reserves output space for the terminal event before emitting progress. A valid blocked
+or completed terminal keeps its semantic fields under the byte budget; if details are
+shortened it adds `truncated: true`, while `state.json` retains the fuller result. The
+reducer requires a matching `init` binding and a schema-valid `structured_output` with
 `completed`/`blocked`, `reason`, `missing`, `next_steps`, and `evidence`; otherwise the
-result is a protocol error. The reusable schema is
+result is a protocol error. For CLI `ERROR`/`FAILED` statuses, a trusted `result.error` (or
+explicit error response) is exposed as a cleaned, bounded `reason` in compact final and
+state; raw/tool output is never forwarded. Tool counts use stable invocation identity
+(`conversation_id + step_index + tool_name` or an explicit tool-call id), so they count
+unique invocations rather than stream events. The reusable schema is
 [references/result-schema.json](references/result-schema.json).
 
 Declare exact dependencies such as `--required-tool search_web` before dispatch. The
