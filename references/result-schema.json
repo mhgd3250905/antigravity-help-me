@@ -60,6 +60,10 @@
         "minLength": 1,
         "maxLength": 500
       }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail"]
     }
   },
   "allOf": [

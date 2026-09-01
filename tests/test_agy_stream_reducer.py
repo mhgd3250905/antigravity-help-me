@@ -83,6 +83,7 @@ def _run(
     expected_conversation: Optional[str] = None,
     expected_project: Optional[str] = None,
     expected_permission_mode: Optional[str] = None,
+    require_verdict: bool = False,
 ) -> Tuple[subprocess.CompletedProcess[bytes], List[Dict[str, Any]], Path, Path]:
     with tempfile.TemporaryDirectory(prefix="agy-reducer-test-") as temp:
         temp_path = Path(temp)
@@ -121,6 +122,8 @@ def _run(
             command.extend(["--expected-project", expected_project])
         if expected_permission_mode:
             command.extend(["--expected-permission-mode", expected_permission_mode])
+        if require_verdict:
+            command.append("--require-verdict")
         completed = subprocess.run(
             command,
             input=raw_prefix + _event_lines(events),
@@ -142,6 +145,58 @@ def _run(
         if raw_log.exists():
             saved_raw.write_bytes(raw_log.read_bytes())
     return completed, output_events, saved_state, saved_raw
+
+
+def _run_live_tail(
+    first_events: Iterable[Dict[str, Any]],
+    tail: bytes,
+    workspace: Path,
+    *,
+    delay: float = 0.05,
+) -> Tuple[int, List[Dict[str, Any]], bytes]:
+    """Write a tail after the first final while keeping stdin open."""
+    command = [
+        sys.executable,
+        "-B",
+        str(REDUCER),
+        "--task-id",
+        "fixture-task",
+        "--workspace",
+        str(workspace),
+        "--task-mode",
+        "REVIEW",
+        "--execution-profile",
+        "REVIEW_EXTERNAL",
+        "--heartbeat-seconds",
+        "-1",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=ROOT,
+    )
+    assert process.stdin is not None
+    process.stdin.write(_event_lines(first_events))
+    process.stdin.flush()
+    time.sleep(delay)
+    process.stdin.write(tail)
+    process.stdin.flush()
+    process.stdin.close()
+    try:
+        process.wait(timeout=3)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+    stdout = process.stdout.read() if process.stdout is not None else b""
+    stderr = process.stderr.read() if process.stderr is not None else b""
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
+    return process.returncode, [json.loads(line) for line in stdout.splitlines() if line.strip()], stderr
 
 
 class ReducerContractTests(unittest.TestCase):
@@ -180,6 +235,90 @@ class ReducerContractTests(unittest.TestCase):
         self.assertNotIn(b"SENSITIVE_RAW_RESPONSE_SHOULD_NOT_APPEAR", completed.stdout)
         self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["status"], "completed")
         state.unlink(missing_ok=True)
+
+    def test_optional_verdict_is_preserved_for_completed_results(self) -> None:
+        workspace = ROOT.resolve()
+        result = _completed()
+        result["structured_output"]["verdict"] = "pass"
+        completed, output, state, _ = _run([_init(workspace), result], workspace)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(output[-1]["verdict"], "pass")
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["final"]["verdict"], "pass")
+        state.unlink(missing_ok=True)
+
+    def test_verify_verdict_is_required_and_limited_to_pass_or_fail(self) -> None:
+        workspace = ROOT.resolve()
+        completed, output, _, _ = _run([_init(workspace), _completed()], workspace, require_verdict=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(output[-1]["code"], "schema_missing_fields")
+        self.assertIn("verdict", output[-1]["fields"])
+
+        invalid = _completed()
+        invalid["structured_output"]["verdict"] = "maybe"
+        completed, output, _, _ = _run([_init(workspace), invalid], workspace, require_verdict=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(output[-1]["code"], "invalid_verdict")
+
+        valid = _completed()
+        valid["structured_output"]["verdict"] = "fail"
+        completed, output, state, _ = _run([_init(workspace), valid], workspace, require_verdict=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(output[-1]["verdict"], "fail")
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["final"]["verdict"], "fail")
+        state.unlink(missing_ok=True)
+
+        blocked = _blocked()
+        completed, output, state, _ = _run([_init(workspace), blocked], workspace, require_verdict=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(output[-1]["protocol"], "blocked")
+        self.assertNotIn("verdict", output[-1])
+        self.assertNotIn("verdict", json.loads(state.read_text(encoding="utf-8"))["final"])
+        state.unlink(missing_ok=True)
+
+        contradictory = _blocked()
+        contradictory["structured_output"]["verdict"] = "fail"
+        completed, output, _, _ = _run([_init(workspace), contradictory], workspace, require_verdict=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(output[-1]["code"], "verdict_on_blocked")
+
+    def test_contiguous_duplicate_final_is_protocol_error_and_only_last_final_is_emitted(self) -> None:
+        workspace = ROOT.resolve()
+        completed, output, state, _ = _run([_init(workspace), _completed(), _completed()], workspace)
+
+        self.assertEqual(completed.returncode, 2, completed.stderr.decode())
+        self.assertEqual(output[-1]["protocol"], "protocol_error")
+        self.assertEqual(output[-1]["code"], "duplicate_final")
+        self.assertFalse(any(item.get("protocol") == "completed" for item in output))
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["final"]["code"], "duplicate_final")
+        state.unlink(missing_ok=True)
+
+    def test_delayed_duplicate_final_is_caught_by_bounded_post_final_drain(self) -> None:
+        workspace = ROOT.resolve()
+        returncode, output, stderr = _run_live_tail(
+            [_init(workspace), _completed()],
+            _event_lines([_completed()]),
+            workspace,
+            delay=0.05,
+        )
+
+        self.assertEqual(returncode, 2, stderr.decode())
+        self.assertEqual(output[-1]["protocol"], "protocol_error")
+        self.assertEqual(output[-1]["code"], "duplicate_final")
+        self.assertFalse(any(item.get("protocol") == "completed" for item in output))
+
+    def test_malformed_tail_after_final_is_protocol_error(self) -> None:
+        workspace = ROOT.resolve()
+        returncode, output, stderr = _run_live_tail(
+            [_init(workspace), _completed()],
+            b"not-json\n",
+            workspace,
+            delay=0.05,
+        )
+
+        self.assertEqual(returncode, 2, stderr.decode())
+        self.assertEqual(output[-1]["protocol"], "protocol_error")
+        self.assertEqual(output[-1]["code"], "malformed_tail")
 
     def test_real_stream_envelope_is_unwrapped(self) -> None:
         workspace = ROOT.resolve()

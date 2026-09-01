@@ -1,13 +1,48 @@
 ---
 name: antigravity-help-me
-description: "在本机 Antigravity CLI (agy) 可用时，通过宿主 Agent 的内置终端把一个明确的 TASK.md 交给 gemini-3.7-flash-high 执行，并用结构化结果和低噪声阶段事件监督验收。"
+description: "在本机 Antigravity CLI (agy) 可用时，用 bridge-first 命令优先 helper 完成环境诊断、五类任务派发和结构化结果验收；底层 TASK/reducer 流程作为 fallback。"
 ---
 
 # Antigravity Help Me
 
 把宿主 Agent 当作负责判断、授权和验收的负责人，把 Antigravity CLI (`agy`)
-当作一次只执行一件明确任务的执行工位。任务契约落盘，命令显式绑定绝对
-workspace，终态必须符合本技能的 JSON schema。
+当作一次只执行一件明确任务的执行工位。本技能为 bridge-first 设计：核心只做好
+主会话向 Agy 转发完整任务、实时监督、保存证据并把结构化结果带回主会话。
+首选 `scripts/agy_helper.py` 命令优先入口：固定环境判断和命令装配由 helper 完成，
+任务契约仍自动落盘，终态必须符合本技能的 JSON schema。默认不生成或强加工具调用预算与读取限制。
+
+## 命令优先入口
+
+新会话先从本仓库运行：
+
+```text
+python <ABS_REPO>\scripts\agy_helper.py doctor --json
+```
+
+Windows 可用已验证的 `py -3`。`doctor` 仅在 agy 缺失/不可运行、必需 CLI 能力缺失、
+固定模型不可用、Python/reducer 不可用时阻断；版本 1.1.22 标记为 `tested`，其他版本
+若能力齐全则 `status=ready` 且 `compatibility=compatible_unverified`，不硬阻断。
+只有 `status=ready` 才继续派发；不要自行重复摸索版本、模型、help flags 或 reducer 能力。
+然后以一行 UTF-8 JSON 通过 stdin 调用一个 preset：
+
+```text
+python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin
+```
+
+也可用 `--request-file <ABS_REQUEST_JSON>`。普通最小请求只包含
+`workspace`、`goal`、`scope`、`acceptance`；默认 `required_tools` 为空，不强加工具预算或 allowlist。
+当 `--request-stdin` 连接交互式 TTY 时，helper 会临时关闭终端 echo 并在退出时可靠恢复（兼容 Windows Console/ConPTY 与 POSIX；无法切换时不破坏输入并建议使用 `--request-file`）。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。
+helper 会安全生成 task id、内部 TASK.md、固定 Agy/reducer argv、state/raw log 和退出码证据。
+正文不进入命令行参数、环境变量或固定 prompt，因此不会受到 Windows 终端参数长度限制。
+
+可用 preset 为 `review-local`、`review-external`、`change`、`repair`、`verify`。
+`change`/`repair` 需要显式 `allowed_changes` 与 `authorization`；`repair` 还需要
+`parent_task_id`、`failure`；`verify` 需要 `subject`，使用新 conversation、只读，
+completed 时要求 `verdict: pass|fail`；blocked 保留 blocked 语义。五类映射、请求字段、framing、退出语义和保留的内部
+文件见 [references/fast-path.md](references/fast-path.md)。
+
+命令优先入口不可用时，才使用下文的手工 TASK/argv/reducer 流程；它们是完整的
+fallback/reference，不是每次新会话的首要学习路径。
 
 ## 适用前提
 
@@ -20,8 +55,9 @@ workspace，终态必须符合本技能的 JSON schema。
 
 ## 主会话与 Agy 的分工
 
-主会话负责确定唯一目标、输入、范围、授权、停止条件和验收；写 TASK.md、选择
-可信环境、启动/监督进程、检查 workspace 变化并作最终决定。Agy 只读取契约，
+主会话负责确定唯一目标、输入、范围、授权、停止条件、验收并选择/确认可信
+workspace；命令优先入口只校验绝对路径、写 TASK.md、启动/监督进程，主会话检查
+workspace 变化并作最终决定。手工 fallback 时主会话自行写 TASK.md。Agy 只读取契约，
 执行已确定的摸排/修改/测试并返回要求的证据；缺少前提时返回有原因的结构化
 `blocked`。
 
@@ -29,7 +65,7 @@ workspace，终态必须符合本技能的 JSON schema。
 架构或优先级判断原样交给 Agy；任务收敛规则见
 [references/task-shaping.md](references/task-shaping.md)。
 
-## 首次运行前探测
+## 手工 fallback：首次运行前探测
 
 在本次顶层任务第一次调度前，从目标 workspace 用内置终端运行：
 
@@ -56,7 +92,7 @@ Windows 可用已探测成功的 `py -3` 代替 `python`。reducer 只有标准�
 Python 时按 [references/compatibility.md](references/compatibility.md) 降级到
 final-only JSON，不把 raw stream 打进主会话。
 
-## 文件任务协议
+## 手工 fallback：文件任务协议
 
 正式任务写在目标 workspace：
 
@@ -99,7 +135,7 @@ Agy CLI 1.1.22 没有 `--max-turns`；读取/检查 allowlist、工具调用预�
 只能作为 TASK.md 的 prompt-level 约束。宿主必须依据 compact supervision 判断是否
 超限，并停止当前 session 或创建窄范围返修任务，不能把不存在的 CLI flag 当作硬门禁。
 
-## 工作区绑定与原生调度
+## 手工 fallback：工作区绑定与原生调度
 
 `--add-dir` 增加 Agy 可访问目录，但不会切换 Agy 的 `cwd`。因此必须同时：
 
@@ -131,7 +167,7 @@ reducer 调用必须带与 TASK.md 一致的
 和已正确引用的绝对路径放入固定 prompt。标准 `stream-json` 命令、Windows/POSIX
 差异和分流方式见 [references/stream-supervision.md](references/stream-supervision.md)。
 
-## 结构化终态
+## 结构化终态（helper 与手工 fallback 共用）
 
 将 `--json-schema` 指向本技能的
 `references/result-schema.json` 的绝对路径（或复制到任务目录后传入该副本的
@@ -159,7 +195,7 @@ fallback、补输入或停止。
 工具出现在 `init.tools` 只证明已注册，不证明当前 mode、权限、认证或网络实际
 可用；先排除执行配置冲突，首次调用失败则要求结构化 `blocked`，不原样重试。
 
-## 三种执行配置与权限分层
+## 三种执行配置与权限分层（helper 与手工 fallback 共用）
 
 - `REVIEW_LOCAL` 是本地代码只读规划/审查：使用 `--mode=plan` 和
   `--effort high`，默认不带
@@ -174,7 +210,7 @@ fallback、补输入或停止。
 
 详细权限边界见 [references/permissions.md](references/permissions.md)。
 
-## 续接、监督与验收
+## 续接、监督与验收（helper 与手工 fallback 共用）
 
 保存 task id、MODE、执行配置、绝对 workspace、命令参数类别、init cwd、project（若暴露）、
 模型、权限模式、conversation id、state/raw log 路径和 Git 基线。

@@ -34,6 +34,13 @@ MAX_REQUIRED_TOOLS = 12
 EXECUTION_PROFILES = ("REVIEW_LOCAL", "REVIEW_EXTERNAL", "CHANGE")
 MAX_INPUT_LINE_BYTES = 1024 * 1024
 MAX_CLI_ERROR_REASON_CHARS = 1000
+# A terminal result should normally be the last producer event, but a short
+# bounded drain lets the supervisor catch a queued or just-arrived trailing
+# final/protocol event without waiting for EOF forever.  The producer may keep
+# stdin open; the reader thread remains daemonised and the reducer still exits
+# after this grace period.
+POST_FINAL_DRAIN_SECONDS = 0.5
+MAX_POST_FINAL_EVENTS = 64
 # Progress is deliberately stopped with a generous reservation for the
 # terminal result.  A terminal result has semantic priority over live phase
 # updates: once emitted, progress cannot be retracted from stdout.
@@ -302,9 +309,13 @@ class Reducer:
         self.update_count = 0
         self.output_bytes = 0
         self.final_seen = False
+        self.final_payload: Optional[Dict[str, Any]] = None
+        self.final_emitted = False
         self.final_protocol: Optional[str] = None
         self.final_outcome: Optional[str] = None
         self.final_data: Dict[str, Any] = {}
+        self.post_final_error: Optional[str] = None
+        self.post_final_events = 0
         self.conversation_id: Optional[str] = None
         self.init_seen = False
         self.init_workspace_verified = False
@@ -447,6 +458,8 @@ class Reducer:
                         "evidence": self._terminal_list(payload.get("evidence"), text_limit, item_count),
                         "truncated": True,
                     }
+                    if payload.get("verdict") in {"pass", "fail"}:
+                        candidate["verdict"] = payload["verdict"]
                     if len(self._encode(candidate)) <= available:
                         return candidate
             return None
@@ -463,6 +476,8 @@ class Reducer:
                         "evidence": self._terminal_list(payload.get("evidence"), text_limit, item_count),
                         "truncated": True,
                     }
+                    if payload.get("verdict") in {"pass", "fail"}:
+                        candidate["verdict"] = payload["verdict"]
                     if len(self._encode(candidate)) <= available:
                         return candidate
             return None
@@ -772,7 +787,7 @@ class Reducer:
         missing_fields = [key for key in required if key not in structured]
         if missing_fields:
             return "protocol_error", {"code": "schema_missing_fields", "fields": missing_fields}
-        extra_fields = sorted(set(structured) - set(required))
+        extra_fields = sorted(set(structured) - set(required) - {"verdict"})
         if extra_fields:
             return "protocol_error", {"code": "schema_extra_fields", "fields": extra_fields[:8]}
         if structured.get("task_id") != self.task_id:
@@ -782,6 +797,18 @@ class Reducer:
         outcome = structured.get("outcome")
         if outcome not in {"completed", "blocked"}:
             return "protocol_error", {"code": "invalid_outcome"}
+        verdict: Optional[str] = None
+        if "verdict" in structured:
+            verdict_value = structured.get("verdict")
+            if verdict_value not in {"pass", "fail"}:
+                return "protocol_error", {"code": "invalid_verdict"}
+            if outcome == "blocked":
+                # A blocked verify has no pass/fail verdict: the task itself
+                # did not complete, so a verdict would be contradictory.
+                return "protocol_error", {"code": "verdict_on_blocked"}
+            verdict = verdict_value
+        if self.args.require_verdict and outcome == "completed" and verdict is None:
+            return "protocol_error", {"code": "schema_missing_fields", "fields": ["verdict"]}
         summary = _compact_text(structured.get("summary"), 2000)
         if not isinstance(structured.get("summary"), str) or not 1 <= len(structured["summary"]) <= 2000 or not summary:
             return "protocol_error", {"code": "empty_summary"}
@@ -814,7 +841,7 @@ class Reducer:
                 return "protocol_error", {"code": "blocked_evidence_empty"}
         elif not cleaned_lists["evidence"]:
             return "protocol_error", {"code": "completed_evidence_empty"}
-        return "completed", {
+        result: Dict[str, Any] = {
             "outcome": outcome,
             # Keep the validated result at schema bounds for state.json.  The
             # stdout terminal is compacted separately according to the bytes
@@ -825,6 +852,9 @@ class Reducer:
             "next_steps": cleaned_lists["next_steps"],
             "evidence": cleaned_lists["evidence"],
         }
+        if verdict is not None:
+            result["verdict"] = verdict
+        return "completed", result
 
     @staticmethod
     def _final_list(value: Any) -> List[str]:
@@ -864,11 +894,12 @@ class Reducer:
                 missing=self._final_list(data.get("missing")),
                 next_steps=self._final_list(data.get("next_steps")),
                 evidence=self._final_list(data.get("evidence")),
+                verdict=data.get("verdict"),
                 conversation_id=self.conversation_id,
             )
-            if any(final_payload.get(field) != data.get(field) for field in ("reason", "missing", "next_steps", "evidence")):
+            if any(final_payload.get(field) != data.get(field) for field in ("reason", "missing", "next_steps", "evidence", "verdict")):
                 final_payload["truncated"] = True
-            self._emit(final_payload, force=True)
+            self.final_payload = final_payload
         elif self.final_protocol == "completed":
             self.state["status"] = "completed"
             self._add_recent("completed", outcome=data.get("outcome", "completed"))
@@ -878,11 +909,12 @@ class Reducer:
                 outcome=data.get("outcome"),
                 summary=_compact_text(data.get("summary"), 240),
                 evidence=self._final_list(data.get("evidence")),
+                verdict=data.get("verdict"),
                 conversation_id=self.conversation_id,
             )
-            if any(final_payload.get(field) != data.get(field) for field in ("summary", "evidence")):
+            if any(final_payload.get(field) != data.get(field) for field in ("summary", "evidence", "verdict")):
                 final_payload["truncated"] = True
-            self._emit(final_payload, force=True)
+            self.final_payload = final_payload
         else:
             self.state["status"] = "protocol_error"
             self._add_recent("protocol_error", code=data.get("code", "invalid_result"))
@@ -897,8 +929,47 @@ class Reducer:
             )
             if data.get("reason") and final_payload.get("reason") != data.get("reason"):
                 final_payload["truncated"] = True
-            self._emit(final_payload, force=True)
+            self.final_payload = final_payload
         self._update_state()
+
+    def _note_post_final_error(self, code: str) -> None:
+        """Remember the first event that arrived after the terminal result."""
+        self.post_final_events += 1
+        if self.post_final_error is None:
+            self.post_final_error = code
+        self._add_recent("post_final", code=code)
+
+    def process_post_final(self, event: Dict[str, Any]) -> None:
+        """Fail closed for any structured event after the first final."""
+        self.last_event_time = time.monotonic()
+        event_type = _extract_type(event)
+        if event_type in {"result", "final"}:
+            self._note_post_final_error("duplicate_final")
+        else:
+            self._note_post_final_error("post_final_event")
+
+    def _replace_with_post_final_error(self) -> None:
+        """Replace a previously prepared terminal result with tail failure."""
+        code = self.post_final_error or "post_final_event"
+        self.final_protocol = "protocol_error"
+        self.final_outcome = None
+        self.final_data = {"code": code}
+        self.state["status"] = "protocol_error"
+        self._add_recent("protocol_error", code=code)
+        self.final_payload = self._safe_event(
+            "final",
+            protocol="protocol_error",
+            code=code,
+            recent=list(self.recent),
+            conversation_id=self.conversation_id,
+        )
+        self._update_state()
+
+    def _emit_prepared_final(self) -> None:
+        """Emit exactly one final after the post-final drain has completed."""
+        if self.final_emitted or self.final_payload is None:
+            return
+        self.final_emitted = self._emit(self.final_payload, force=True)
 
     def process(self, event: Dict[str, Any]) -> None:
         now = time.monotonic()
@@ -939,19 +1010,25 @@ class Reducer:
     def finish(self) -> int:
         if not self.final_seen:
             self.final_protocol = "protocol_error"
+            self.final_outcome = None
+            final_code = "missing_final" if not self.malformed_count else "malformed_stream"
+            self.final_data = {"code": final_code}
             self.state["status"] = "protocol_error"
-            self._add_recent("protocol_error", code="missing_final")
-            self._emit(
-                self._safe_event(
-                    "final",
-                    protocol="protocol_error",
-                    code="missing_final" if not self.malformed_count else "malformed_stream",
-                    recent=list(self.recent),
-                    conversation_id=self.conversation_id,
-                ),
-                force=True,
+            self._add_recent("protocol_error", code=final_code)
+            self.final_payload = self._safe_event(
+                "final",
+                protocol="protocol_error",
+                code=final_code,
+                recent=list(self.recent),
+                conversation_id=self.conversation_id,
             )
             self._update_state()
+        elif self.post_final_error:
+            # The first terminal result is held until this point so a tail
+            # violation cannot leave an earlier accepted ``completed`` event
+            # as the helper's apparent final result.
+            self._replace_with_post_final_error()
+        self._emit_prepared_final()
         self._write_raw_log()
         if self.final_protocol in {"completed", "blocked"}:
             return 0
@@ -966,6 +1043,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-conversation", help="Conversation id required for an explicit resume")
     parser.add_argument("--expected-project", help="Project id required when the launch declares one")
     parser.add_argument("--expected-permission-mode", help="Exact init permission_mode required by the launch policy")
+    parser.add_argument(
+        "--require-verdict",
+        action="store_true",
+        help="Require the optional pass/fail verdict field (used by independent verification)",
+    )
     parser.add_argument(
         "--required-tool",
         action="append",
@@ -1036,6 +1118,37 @@ def _read_stdin(input_queue: "queue.Queue[Optional[bytes]]") -> None:
         input_queue.put(None)
 
 
+def _drain_after_final(
+    reducer: Reducer,
+    input_queue: "queue.Queue[Optional[bytes]]",
+) -> None:
+    """Inspect a bounded amount of NDJSON that follows the first final."""
+    deadline = time.monotonic() + POST_FINAL_DRAIN_SECONDS
+    while reducer.post_final_events < MAX_POST_FINAL_EVENTS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            raw = input_queue.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if raw is None:
+            break
+        reducer._remember_raw(raw)
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            reducer.malformed_count += 1
+            reducer._note_post_final_error("malformed_tail")
+            continue
+        if isinstance(value, dict):
+            reducer.process_post_final(value)
+        else:
+            reducer._note_post_final_error("non_object_tail")
+    if reducer.post_final_events >= MAX_POST_FINAL_EVENTS:
+        reducer._note_post_final_error("post_final_event_limit")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.max_updates < 1:
@@ -1079,8 +1192,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 reducer.process(value)
                 reducer._update_state()
                 if reducer.final_seen:
-                    # result/final is terminal.  Do not depend on the producer
-                    # closing stdout promptly after its terminal event.
+                    # Hold the terminal payload until this short drain ends.
+                    # This catches queued or just-arrived tail protocol events
+                    # while still avoiding an EOF dependency.
+                    _drain_after_final(reducer, input_queue)
                     break
             else:
                 reducer.malformed_count += 1

@@ -4,6 +4,11 @@
 reducer，不是后台任务调度器：Agy 仍是一次前台进程，宿主仍负责等待、授权和
 最终验收。
 
+命令优先调用应使用 `scripts/agy_helper.py` 的 `doctor` → `run` fast path；helper
+会逐行转发 reducer 的 compact JSON 事件，并在连续 75 秒无可见输出且 producer 仍在运行时发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算），保存 raw stream，并对本次精确的
+producer/reducer 子进程施加有界 timeout。本文下面的直接管道和 TASK/argv 示例是
+helper 不可用时的手工 fallback。不要把 raw stream 直接接入宿主上下文。
+
 ## 调度形状
 
 把 `workspace`、`TASK.md`、schema、raw log 和 state 都解析成绝对路径。命令
@@ -29,8 +34,7 @@ CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemin
 
 每次启动都显式传 `--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy
 1.1.22 对该模型只接受省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生
-model selection conflict。成本由读取/检查 allowlist、prompt-level 工具调用预算和
-停止条件控制。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
+model selection conflict。默认 fast path 为 bridge-first，不强加微观工具或预算限制；若用户显式提供 allowlist、预算或停止条件，则作为 prompt-level constraints 注入。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
 `--effort low|medium|high`。
 
 `--json-schema` 必须是 Agy 进程可读的绝对文件路径，推荐直接指向本技能的
@@ -101,7 +105,12 @@ AGY_EXIT=$(cat "$AGY_EXIT_FILE")
 - `final`：只报告经 schema 和 task id 校验后的 `completed`、`blocked` 或
   `protocol_error`；最多保留三个有意义的近期事件用于协议错误诊断。CLI
   `ERROR`/`FAILED` 等状态若带可信 `result.error`（或明确标记为错误的 `response`），
-  还会保留经控制字符清洗和长度限制的 `reason`，不转发 raw/tool output。
+  还会保留经控制字符清洗和长度限制的 `reason`，不转发 raw/tool output。首个
+  `final` 会先暂存，reducer 只做约 0.5 秒且最多 64 条事件的尾随 drain；期间若
+  收到重复 `final`/`result`、其他尾随事件、非对象或畸形 NDJSON，最终只发出一个
+  `protocol_error` final（分别保留 `duplicate_final`、`post_final_event`、
+  `non_object_tail` 或 `malformed_tail` 码）。没有尾随事件时不依赖 EOF；stdin
+  仍保持打开也会在该有界窗口后退出。
 
 ### 能力预检
 

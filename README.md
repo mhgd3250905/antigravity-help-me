@@ -2,7 +2,7 @@
 
 > **An Agent Skill that enables your host Agent to call your local Antigravity CLI (`agy`) to complete a concrete task.**
 
-Current version: **v1.2.1**
+Current version: **v1.3.0**
 
 ---
 
@@ -13,18 +13,52 @@ terminal-based agent) to dispatch one scoped task to the user's locally installe
 and authenticated Antigravity CLI (`agy`), supervise it with low-noise progress
 events, and independently verify the structured outcome.
 
+## Command-first fast path
+
+New sessions should use the bundled standard-library helper as a bridge-first entry point:
+
+```text
+python <ABS_REPO>\scripts\agy_helper.py doctor --json
+python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin
+```
+
+Send one UTF-8 JSON object as one stdin line, or use `--request-file`. A minimal request
+contains `workspace`, `goal`, `scope`, and `acceptance`; long task text stays in the
+automatically generated `.antigravity-help-me/tasks/<task-id>/TASK.md`, not in argv or
+environment variables. When `--request-stdin` is connected to an interactive TTY, the helper
+temporarily disables terminal echo and restores it on exit (compatible with Windows
+Console/ConPTY and POSIX; use `--request-file` when echo switching is unavailable). The helper
+also emits its own low-frequency heartbeat every 75s of silence while the producer is running,
+independent of the reducer's 2 KiB progress budget. Default `required_tools` is empty, and
+no default tool budget or read allowlist is imposed. Available presets are `review-local`,
+`review-external`, `change`, `repair`, and `verify`. The latter two support focused repair
+and independent verification; a completed `verify` requires a machine-readable `verdict: pass|fail`,
+while a blocked verify keeps its blocked semantics.
+
+`doctor` checks the tested Agy baseline (`1.1.22`, marked `tested`; other versions with complete
+capabilities are `ready` and `compatible_unverified`), required help flags, exact model
+availability, Python, and the reducer. `run` retains the immutable task contract,
+compact state, bounded raw stream, producer/reducer stderr and separate exit codes.
+It uses a bounded exact-process timeout and never adds
+`--dangerously-skip-permissions` automatically. See
+[references/fast-path.md](references/fast-path.md) for the request contract, preset
+mapping, output semantics and manual fallback.
+
 ## How It Works
 
-1. **Shape the Task**: Write a clear specification with absolute workspace paths into `.antigravity-help-me/tasks/<task-id>/TASK.md`.
-2. **Bind and Execute**: Start `agy` from that workspace with `--add-dir <ABS_WORKSPACE>`, `--json-schema <ABS_SCHEMA>`, and `--output-format stream-json`.
-3. **Reduce Supervision**: Pipe raw NDJSON through `scripts/agy_stream_reducer.py`; only bounded init/phase/heartbeat/final events reach the host context.
-4. **Verify and Accept**: Independently check the schema-valid result, file diff, tests, and evidence.
+1. **Doctor**: Confirm `agy`, model, capabilities, Python and reducer readiness.
+2. **Run**: Validate the JSON request, generate an immutable TASK.md, and bind the
+   selected preset to the correct Agy/reducer profile.
+3. **Reduce Supervision**: Pipe raw NDJSON through `scripts/agy_stream_reducer.py`; only
+   bounded init/phase/heartbeat/final events reach the host context as they arrive.
+4. **Verify and Accept**: Independently check the schema-valid result, file diff, tests,
+   verdict (for `verify`) and evidence.
 
 For release work, the host first materializes version files such as `VERSION`, README,
 and `SECURITY.md`, then runs a read-only readiness gate, and only then creates tags or
 pushes. An implementation review must not treat those future host-owned actions as a
-current blocker. Each `TASK.md` should also name its read/inspection allowlist, tool
-call budget, and stop conditions; these are prompt-level constraints, not CLI hard gates.
+current blocker. If the user explicitly provides constraints (such as a read allowlist or
+tool call budget), they enter the task contract as prompt-level constraints.
 Agy CLI 1.1.22 has no `--max-turns`; the host uses compact supervision to detect a
 budget overrun and stop or create a focused repair task.
 
@@ -55,7 +89,7 @@ Clone or copy into your agent's skill directory:
 git clone https://github.com/mhgd3250905/antigravity-help-me.git /path/to/your/agent/skills/antigravity-help-me
 ```
 
-## Invocation Example
+## Invocation Example (manual fallback)
 
 User prompt to host Agent:
 
@@ -63,10 +97,11 @@ User prompt to host Agent:
 $antigravity-help-me Implement input validation in auth/routes.py matching schemas/error.py.
 ```
 
-The host Agent creates `.antigravity-help-me/tasks/task-001/TASK.md`, executes
-`agy`, and verifies the requested result and evidence.
+The command-first helper creates `.antigravity-help-me/tasks/<task-id>/TASK.md`, executes
+`agy`, and verifies the requested result and evidence. If the helper is unavailable,
+the host Agent may create the TASK.md and use the lower-level manual flow below.
 
-## Stream Command Shape
+## Stream Command Shape (manual fallback)
 
 ```bash
 REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout 1800s -p '<FIXED_PROMPT>'

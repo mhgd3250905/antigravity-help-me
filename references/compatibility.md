@@ -2,6 +2,15 @@
 
 核心协议由 `agy`、宿主内置终端和工作区任务文件组成。技能发现、终端 session 和授权 UI 由各宿主实现。
 
+## Fast path
+
+优先运行 `python <ABS_REPO>\scripts\agy_helper.py doctor --json`，再用
+`run --preset ... --request-stdin` 或 `--request-file`。helper 使用标准库，作为 bridge-first 入口负责
+版本/model/help/reducer 预检（版本 1.1.22 标记 tested，其他版本若能力齐全则 compatible_unverified 可继续）、绝对 workspace 任务书和精确 producer/reducer
+argv。长请求只通过有界 UTF-8 stdin/file 进入 helper，不放进 argv 或环境变量。当 `--request-stdin` 连接交互式 TTY 时，helper 在读取前临时关闭输入 echo 并在成功、解析失败与异常路径可靠恢复（兼容 Windows Console/ConPTY 与 POSIX）；无法切换时不破坏输入并建议使用 `--request-file`。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。默认无微观工具/预算限制。
+命令优先接口、五个 preset、timeout 和退出语义见
+[fast-path.md](fast-path.md)；本页其余内容描述 helper 不可用时的手工 fallback。
+
 ## 宿主最低契约
 
 宿主 Agent 必须能够：
@@ -44,11 +53,13 @@
 - 只取消宿主返回的当前 session 或精确 PID；不要 `Stop-Process -Name agy`。
 - 可用 `py -3` 或已探测成功的 `python` 启动本技能 reducer。PowerShell 直接把
   Agy stdout 管道给 reducer；不要把中间 NDJSON 打印到宿主模型日志。
+- 当在 Windows Console/ConPTY 交互式终端下使用 `--request-stdin` 时，helper 会通过 Win32 API 临时禁用 echo；若控制台模式切换受限，建议改用 `--request-file`。
 
 ## macOS 与 Linux
 
 - 使用宿主内置 shell，固定 prompt 用单引号；task id 不含空格和 shell 元字符。
 - 不把 TASK.md 正文放进 argv、环境变量或命令替换。
+- helper 在 POSIX TTY 下通过 `termios` 临时关闭 echo 并在退出时恢复；若终端不支持属性切换，建议使用 `--request-file`。
 - reducer 使用 Python 3 标准库，可用 `python3` 或已探测成功的 `python` 启动；不
   依赖 Node、jq 或全局 shell profile。
 
