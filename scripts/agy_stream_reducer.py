@@ -646,7 +646,7 @@ class Reducer:
                 if self.missing_tools:
                     self.capability_error = "capability_missing"
 
-        # agy 1.1.22 documents and emits cwd, but does not document an
+        # agy 1.1.24 documents and emits cwd, but does not document an
         # added-dir field in init.  Do not let arbitrary nested metadata stand
         # in for the process binding proof.
         self.init_workspace_verified = bool(

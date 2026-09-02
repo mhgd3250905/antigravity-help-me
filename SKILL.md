@@ -16,17 +16,17 @@ description: "在本机 Antigravity CLI (agy) 可用时，用 bridge-first 命�
 新会话先从本仓库运行：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py doctor --json
+python <ABS_REPO>\scripts\agy_helper.py doctor --json [--model <MODEL_ID>]
 ```
 
-Windows 可用已验证的 `py -3`。`doctor` 仅在 agy 缺失/不可运行、必需 CLI 能力缺失、
-固定模型不可用、Python/reducer 不可用时阻断；版本 1.1.22 标记为 `tested`，其他版本
+Windows 可用已验证的 `py -3`。`doctor` 对选定模型执行精确可用性检查（`agy --output-format json models` 精确匹配），仅在 agy 缺失/不可运行、必需 CLI 能力缺失、
+选定模型不可用、Python/reducer 不可用或模型无法确定 effort 时阻断；版本 1.1.24 标记为 `tested`，其他版本
 若能力齐全则 `status=ready` 且 `compatibility=compatible_unverified`，不硬阻断。
 只有 `status=ready` 才继续派发；不要自行重复摸索版本、模型、help flags 或 reducer 能力。
-然后以一行 UTF-8 JSON 通过 stdin 调用一个 preset：
+然后以一行 UTF-8 JSON 通过 stdin 调用一个 preset（支持 `--model`，默认 `gemini-3.8-flash-high`，由 `-high`/`-medium`/`-low` 后缀确定性推导 `--effort`）：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin
+python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin [--model <MODEL_ID>]
 ```
 
 也可用 `--request-file <ABS_REQUEST_JSON>`。普通最小请求只包含
@@ -41,10 +41,10 @@ helper 会安全生成 task id、内部 TASK.md、固定 Agy/reducer argv、stat
 completed 时要求 `verdict: pass|fail`；blocked 保留 blocked 语义。五类映射、请求字段、framing、退出语义和保留的内部
 文件见 [references/fast-path.md](references/fast-path.md)。
 
-当多个任务彼此独立且工作区策略允许时，可在一次 helper 调用中使用 `batch`：
+当多个任务彼此独立且工作区策略允许时，可在一次 helper 调用中使用 `batch`（支持 `--model` 统一指定批次模型，批次内所有 job 使用同一选定模型）：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin
+python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin [--model <MODEL_ID>]
 ```
 
 输入仍是一个有界 UTF-8 JSON 对象，形状为
@@ -74,7 +74,7 @@ fallback/reference，不是每次新会话的首要学习路径。
 - 当前机器已经安装、认证并可运行 `agy`；技能不安装、更新或登录 Agy。
 - Agy 可访问目标 workspace、自己的 OAuth 文件和所需 localhost 服务；若宿主
   沙箱隐藏凭据或禁止本地端口，停止并报告，不尝试绕过。
-- 本技能固定使用 `gemini-3.7-flash-high`；不可用时硬失败，不静默换模型。
+- 本技能默认使用 `gemini-3.8-flash-high`；支持通过 `--model` 传入精确 Agy 模型 ID，effort 由 `-high`/`-medium`/`-low` 确定性推导；无法推导 effort 或模型不可用时硬失败，不静默换模型或猜测 effort。
 
 ## 主会话与 Agy 的分工
 
@@ -99,7 +99,7 @@ agy --help
 agy --output-format json models
 ```
 
-确认 `agy` 退出码为 0，模型列表精确包含 `gemini-3.7-flash-high`，help 支持
+确认 `agy` 退出码为 0，模型列表精确包含选定模型（默认 `gemini-3.8-flash-high`），help 支持
 `--add-dir`、`--mode`、`-p`/`--print`、`--model`、`--effort low|medium|high`、
 `--output-format stream-json` 和 `json`、`--json-schema`、`--print-timeout`、
 `--conversation` 以及按模式需要的 `--dangerously-skip-permissions`。所有全局选项放在同一层；调用带子命令时，
@@ -155,7 +155,7 @@ TASK.md 是调度后的不可变契约。纠偏时创建新的 task id 和 TASK.
 指令。Git workspace 只把 `.antigravity-help-me/` 加入本地
 `.git/info/exclude`，不要擅自修改项目 `.gitignore`。
 
-Agy CLI 1.1.22 没有 `--max-turns`；读取/检查 allowlist、工具调用预算和停止条件
+Agy CLI 1.1.24 没有 `--max-turns`；读取/检查 allowlist、工具调用预算和停止条件
 仅在用户显式提供时作为 TASK.md 的 prompt-level 约束注入。若用户显式配置了预算，宿主依据
 compact supervision 判断是否超限并停止当前 session 或创建窄范围返修任务，不能把不存在的
 CLI flag 当作硬门禁。未显式提供预算时，工具计数仅作可观测性展示，不构成 fail-closed 或停机条件，
@@ -168,7 +168,7 @@ CLI flag 当作硬门禁。未显式提供预算时，工具计数仅作可观�
 1. 使用目标 workspace 的绝对路径创建 TASK.md、schema、state/raw log；
 2. 从该绝对 workspace 启动 Agy，并传入 `--add-dir <ABS_WORKSPACE>`；
 3. 在 stream 的 `init` 事件中核对 `cwd` 与该 workspace 的规范化绝对路径完全
-   相同；Agy 1.1.22 不暴露可依赖的 added-dir 证明字段，不能拿任意元数据替代；
+   相同；Agy 1.1.24 不暴露可依赖的 added-dir 证明字段，不能拿任意元数据替代；
    绑定无法证明时停止，不凭“任务完成”字样验收。
 
 不指定 project 时 Agy 可能落到固定 `default-cli-project`，不等于当前 shell
@@ -182,8 +182,9 @@ Read the task contract at "<ABS_TASK_PATH>" in full before acting. Execute exact
 ```
 
 使用 argv 数组逐参数传递；Agy 启动命令三个执行配置都必须显式传入
-`--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受
-省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生 model selection conflict。
+由选定模型推导的 `--effort`（默认模型 `gemini-3.8-flash-high` 对应 `--effort high`）。
+Agy 对模型只接受省略 `--effort` 或后缀匹配的 effort，不匹配会产生 model selection conflict。
+无法确定 effort 的模型会被拒绝。
 若需要控制成本，由用户显式提供的读取/检查 allowlist、prompt-level 工具调用预算或停止条件控制（未显式提供时不强加限制）。
 reducer 调用必须带与 TASK.md 一致的
 `--task-mode REVIEW|CHANGE` 和 `--execution-profile REVIEW_LOCAL|REVIEW_EXTERNAL|CHANGE`
@@ -224,13 +225,13 @@ fallback、补输入或停止。
 ## 三种执行配置与权限分层（helper 与手工 fallback 共用）
 
 - `REVIEW_LOCAL` 是本地代码只读规划/审查：使用 `--mode=plan` 和
-  `--effort high`，默认不带
+  `--effort high`（或匹配 effort），默认不带
   `--dangerously-skip-permissions`；不要同时传 `--disable-slash-commands`，否则
-  Agy 1.1.22 的 plan expansion 不生效。
+  Agy 1.1.24 的 plan expansion 不生效。
 - `REVIEW_EXTERNAL` 是外部研究或需要 web/其他工具的审查：省略 `--mode`，使用
-  `--effort high`，默认
+  `--effort high`（或匹配 effort），默认
   不带 `--dangerously-skip-permissions`；不要因“审查”而套 plan，以免改变工具面。
-- `CHANGE` 使用 `--mode=accept-edits` 和 `--effort high`。仅在 workspace 可信、用户已授权写入和
+- `CHANGE` 使用 `--mode=accept-edits` 和 `--effort high`（或匹配 effort）。仅在 workspace 可信、用户已授权写入和
   命令、且 headless 确实需要非交互权限时，才额外使用
   `--dangerously-skip-permissions`。该 flag 不扩大授权，也不替代宿主验收。
 

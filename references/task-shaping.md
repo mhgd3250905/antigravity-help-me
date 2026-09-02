@@ -15,7 +15,7 @@ Gemini Flash High 擅长快速完成确定任务，不代替主会话作开放�
 ## batch 的独立性与工作区策略
 
 只有彼此独立的任务才放入同一 `batch`；同一 conversation 的 resume 必须串行，不能
-为了占满三条 lane 人为拆分一个任务。`review-local`、`review-external` 和 `verify`
+为了占满三条 lane 人为拆分一个任务。批次内所有 job 统一使用同一选定模型（one model per batch）。`review-local`、`review-external` 和 `verify`
 属于只读任务，同一或祖先/子孙重叠 workspace 可以共享；`change` 和 `repair` 属于
 写任务，与重叠读/写互斥，互不重叠 workspace 才可并发写。helper 的 `batch` admission
 只约束当前一次调用，独立终端/helper 调用不共享这个上限。
@@ -55,7 +55,7 @@ Gemini Flash High 擅长快速完成确定任务，不代替主会话作开放�
 - “整理代码”改成具体缺陷、目标行为、文件范围和测试。
 - “你决定”改成主会话已选方案；只允许 Agy 决定不影响契约的局部实现细节。
 - 若用户显式要求约束范围或成本，可在任务中明确读取/检查 allowlist（精确路径或有限模式）、
-  工具调用预算或停止条件；未显式提供时，默认不强加预算或 allowlist。Agy CLI 1.1.22
+  工具调用预算或停止条件；未显式提供时，默认不强加预算或 allowlist。Agy CLI 1.1.24
   没有 `--max-turns`，用户显式提供的 allowlist、工具预算和停止条件属于 prompt-level 约束；
   仅在显式配置预算时宿主才通过 compact supervision 判断超限并停止或创建窄范围返修任务。
   未显式提供预算时，工具计数仅供观察，宿主不得自行发明上限或停止任务。

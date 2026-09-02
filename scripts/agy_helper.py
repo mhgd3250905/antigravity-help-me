@@ -31,8 +31,8 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SCHEMA = ROOT / "references" / "result-schema.json"
 DEFAULT_REDUCER = ROOT / "scripts" / "agy_stream_reducer.py"
-MODEL = "gemini-3.7-flash-high"
-TESTED_AGY_VERSION = "1.1.22"
+DEFAULT_MODEL = "gemini-3.8-flash-high"
+TESTED_AGY_VERSION = "1.1.24"
 PRINT_TIMEOUT = "1800s"
 DEFAULT_RUN_TIMEOUT_SECONDS = 1860.0
 MAX_RUN_TIMEOUT_SECONDS = 7200.0
@@ -47,6 +47,7 @@ MAX_STDERR_BYTES = 64 * 1024
 MAX_BATCH_PARALLEL = 3
 DEFAULT_BATCH_MAX_PARALLEL = 3
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 VERSION_PATTERN = re.compile(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
 
 # Stable non-zero codes are deliberately independent of subprocess return
@@ -61,6 +62,43 @@ EXIT_RUNTIME_UNAVAILABLE = 14
 EXIT_REQUEST_INVALID = 20
 EXIT_TASK_EXISTS = 21
 EXIT_DISPATCH_FAILED = 30
+
+
+def _normalize_model(model: str) -> str:
+    if not isinstance(model, str) or not model.strip():
+        raise HelperError(EXIT_REQUEST_INVALID, "model must be a non-empty string")
+    normalized = model.strip()
+    if not MODEL_ID_PATTERN.fullmatch(normalized):
+        raise HelperError(
+            EXIT_REQUEST_INVALID,
+            "model must be an Agy model ID using only letters, digits, '.', '_', '/', or '-'",
+        )
+    return normalized
+
+
+def _derive_effort(model: str) -> str:
+    normalized = _normalize_model(model)
+    if normalized.endswith("-high"):
+        return "high"
+    if normalized.endswith("-medium"):
+        return "medium"
+    if normalized.endswith("-low"):
+        return "low"
+    raise HelperError(
+        EXIT_REQUEST_INVALID,
+        f"cannot determine effort from model '{model}'; model must end with -high, -medium, or -low",
+    )
+
+
+def _model_config(model: str, effort: Optional[str] = None) -> Tuple[str, str]:
+    normalized = _normalize_model(model)
+    derived_effort = _derive_effort(normalized)
+    if effort is not None and effort != derived_effort:
+        raise HelperError(
+            EXIT_REQUEST_INVALID,
+            f"effort '{effort}' does not match model '{normalized}' (expected '{derived_effort}')",
+        )
+    return normalized, derived_effort
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     "review-local": {
@@ -302,12 +340,13 @@ def _help_flags(help_text: str) -> Dict[str, bool]:
     }
 
 
-def _doctor(agy: Optional[str]) -> Tuple[int, Dict[str, Any]]:
+def _doctor(agy: Optional[str] = None, model: str = DEFAULT_MODEL) -> Tuple[int, Dict[str, Any]]:
+    model, _ = _model_config(model)
     resolved = _resolve_agy(agy)
     result: Dict[str, Any] = {
         "status": "blocked",
         "compatibility": "unknown",
-        "tested_baseline": {"agy_version": TESTED_AGY_VERSION, "model": MODEL},
+        "tested_baseline": {"agy_version": TESTED_AGY_VERSION, "model": DEFAULT_MODEL},
         "agy": {
             "found": bool(resolved),
             "path": resolved,
@@ -317,7 +356,7 @@ def _doctor(agy: Optional[str]) -> Tuple[int, Dict[str, Any]]:
             "compatibility": "unknown",
         },
         "help": {"ok": False, "flags": {}, "missing_flags": []},
-        "models": {"ok": False, "required": MODEL, "available": False},
+        "models": {"ok": False, "required": model, "available": False},
         "runtime": {
             "python": {"ok": False, "version": None, "executable": sys.executable},
             "reducer": {"ok": False, "path": str(DEFAULT_REDUCER)},
@@ -358,10 +397,10 @@ def _doctor(agy: Optional[str]) -> Tuple[int, Dict[str, Any]]:
             [*_agy_command(resolved), "--output-format", "json", "models"]
         )
         parsed = _parse_json_output(models_out)
-        model_available = models_code == 0 and _contains_model(parsed, MODEL)
+        model_available = models_code == 0 and _contains_model(parsed, model)
         result["models"] = {
             "ok": models_code == 0 and parsed is not None,
-            "required": MODEL,
+            "required": model,
             "available": model_available,
         }
         if models_code != 0:
@@ -694,7 +733,16 @@ def _markdown_items(items: Iterable[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
-def _render_task(request: Mapping[str, Any], preset_name: str, task_id: str, task_path: Path) -> str:
+def _render_task(
+    request: Mapping[str, Any],
+    preset_name: str,
+    task_id: str,
+    task_path: Path,
+    *,
+    model: str = DEFAULT_MODEL,
+    effort: Optional[str] = None,
+) -> str:
+    model, effort = _model_config(model, effort)
     preset = PRESETS[preset_name]
     profile = preset["profile"]
     mode = preset["task_mode"]
@@ -748,7 +796,7 @@ def _render_task(request: Mapping[str, Any], preset_name: str, task_id: str, tas
             "",
             "## 已定决策",
             f"- preset `{preset_name}` 固定映射到 `{profile}` / `{mode}`。",
-            "- 使用固定模型 `gemini-3.7-flash-high` 与 `--effort high`。",
+            f"- 使用模型 `{model}` 与 `--effort {effort}`。",
             "- 独立验收和返修使用新 conversation。" if preset["new_conversation"] else "- 本任务不续接既有 conversation。",
             "",
             "## 范围与步骤",
@@ -792,7 +840,14 @@ def _render_task(request: Mapping[str, Any], preset_name: str, task_id: str, tas
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _create_task(request: Mapping[str, Any], preset_name: str) -> Tuple[str, Path, Path]:
+def _create_task(
+    request: Mapping[str, Any],
+    preset_name: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    effort: Optional[str] = None,
+) -> Tuple[str, Path, Path]:
+    model, effort = _model_config(model, effort)
     workspace = Path(request["workspace"])
     tasks_root = workspace / ".antigravity-help-me" / "tasks"
     tasks_root.mkdir(parents=True, exist_ok=True)
@@ -808,7 +863,7 @@ def _create_task(request: Mapping[str, Any], preset_name: str) -> Tuple[str, Pat
         task_path = task_dir / "TASK.md"
         try:
             with task_path.open("x", encoding="utf-8", newline="\n") as handle:
-                handle.write(_render_task(request, preset_name, task_id, task_path))
+                handle.write(_render_task(request, preset_name, task_id, task_path, model=model, effort=effort))
         except FileExistsError as exc:
             raise HelperError(EXIT_TASK_EXISTS, "task contract already exists; refusing to overwrite it") from exc
         except OSError as exc:
@@ -903,16 +958,20 @@ def _build_agy_argv(
     schema: Path,
     task_path: Path,
     profile: Mapping[str, Any],
+    *,
+    model: str = DEFAULT_MODEL,
+    effort: Optional[str] = None,
 ) -> List[str]:
+    model, effort = _model_config(model, effort)
     argv = [*_agy_command(agy), "--add-dir", str(workspace)]
     if profile["agy_mode"]:
         argv.extend(["--mode", profile["agy_mode"]])
     argv.extend(
         [
             "--model",
-            MODEL,
+            model,
             "--effort",
-            "high",
+            effort,
             "--output-format",
             "stream-json",
             "--json-schema",
@@ -1013,7 +1072,8 @@ def _dispatch(
     request: Mapping[str, Any],
     preset_name: str,
     *,
-    agy: Optional[str],
+    model: str = DEFAULT_MODEL,
+    agy: Optional[str] = None,
     schema: Path = DEFAULT_SCHEMA,
     reducer: Path = DEFAULT_REDUCER,
     skip_preflight: bool = False,
@@ -1023,24 +1083,37 @@ def _dispatch(
     batch_id: Optional[str] = None,
     job_id: Optional[str] = None,
 ) -> Tuple[int, Dict[str, Any]]:
+    model, effort = _model_config(model)
     if not skip_preflight:
-        doctor_code, doctor_result = _doctor(agy)
+        doctor_code, doctor_result = _doctor(agy, model=model)
         if doctor_code != EXIT_READY:
-            return doctor_code, {
+            preflight_summary = {
                 "event": "run",
                 "status": "preflight_failed",
+                "model": model,
+                "effort": effort,
                 "problems": doctor_result["problems"],
                 "next_action": doctor_result["next_action"],
             }
+            _emit_dispatch_event(preflight_summary, event_sink)
+            return doctor_code, preflight_summary
     normalized = _validate_request(request, preset_name)
-    task_id, task_dir, task_path = _create_task(normalized, preset_name)
+    task_id, task_dir, task_path = _create_task(normalized, preset_name, model=model, effort=effort)
     profile = PRESETS[preset_name]
     agy_path = _resolve_agy(agy)
     if not agy_path:
         raise HelperError(EXIT_AGY_MISSING, "agy executable is not available")
     schema = schema.resolve(strict=False)
     reducer = reducer.resolve(strict=False)
-    agy_argv = _build_agy_argv(agy_path, Path(normalized["workspace"]), schema, task_path, profile)
+    agy_argv = _build_agy_argv(
+        agy_path,
+        Path(normalized["workspace"]),
+        schema,
+        task_path,
+        profile,
+        model=model,
+        effort=effort,
+    )
     reducer_argv = _build_reducer_argv(
         task_id,
         Path(normalized["workspace"]),
@@ -1058,6 +1131,8 @@ def _dispatch(
         "workspace": normalized["workspace"],
         "profile": profile["profile"],
         "task_mode": profile["task_mode"],
+        "model": model,
+        "effort": effort,
         "run_timeout_seconds": run_timeout,
         "producer_grace_seconds": POST_FINAL_PRODUCER_GRACE_SECONDS,
         "agy_argv": [*agy_argv[:-1], "<FIXED_PROMPT>"],
@@ -1292,6 +1367,8 @@ def _dispatch(
         "event": "run",
         "task_id": task_id,
         "status": status,
+        "model": model,
+        "effort": effort,
         "producer_exit_code": producer_exit,
         "reducer_exit_code": reducer_exit,
         "task_dir": str(task_dir),
@@ -1389,12 +1466,20 @@ def _batch_terminal_summary(
     job: Mapping[str, Any],
     status: str,
     *,
+    model: str = DEFAULT_MODEL,
+    effort: Optional[str] = None,
     error: Optional[str] = None,
 ) -> Dict[str, Any]:
+    try:
+        model, effort = _model_config(model, effort)
+    except HelperError:
+        effort = None
     summary: Dict[str, Any] = {
         "event": "run",
         "task_id": None,
         "status": status,
+        "model": model,
+        "effort": effort,
         "producer_exit_code": None,
         "reducer_exit_code": None,
         "task_dir": None,
@@ -1429,6 +1514,8 @@ def _batch_job_result(
     }
     for key in (
         "task_id",
+        "model",
+        "effort",
         "producer_exit_code",
         "reducer_exit_code",
         "task_dir",
@@ -1456,13 +1543,15 @@ def _batch_job_result(
 def _dispatch_batch(
     request: Mapping[str, Any],
     *,
-    agy: Optional[str],
+    model: str = DEFAULT_MODEL,
+    agy: Optional[str] = None,
     schema: Path = DEFAULT_SCHEMA,
     reducer: Path = DEFAULT_REDUCER,
     skip_preflight: bool = False,
     run_timeout: float = DEFAULT_RUN_TIMEOUT_SECONDS,
     cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[int, Dict[str, Any]]:
+    model, effort = _model_config(model)
     normalized = _validate_batch_request(request)
     batch_id = normalized["batch_id"] or _generate_batch_id()
     jobs: List[Dict[str, Any]] = normalized["jobs"]
@@ -1496,6 +1585,8 @@ def _dispatch_batch(
             "event": "batch",
             "batch_id": batch_id,
             "status": "started",
+            "model": model,
+            "effort": effort,
             "max_parallel": max_parallel,
             "job_count": len(jobs),
             "jobs": [
@@ -1511,7 +1602,7 @@ def _dispatch_batch(
     )
 
     if not skip_preflight:
-        doctor_code, doctor_result = _doctor(agy)
+        doctor_code, doctor_result = _doctor(agy, model=model)
         if doctor_code != EXIT_READY:
             preflight_jobs = [
                 {
@@ -1519,6 +1610,8 @@ def _dispatch_batch(
                     "preset": job["preset"],
                     "workspace": job["request"]["workspace"],
                     "status": "preflight_failed",
+                    "model": model,
+                    "effort": effort,
                     "exit_code": doctor_code,
                 }
                 for job in jobs
@@ -1528,6 +1621,8 @@ def _dispatch_batch(
                 "batch_id": batch_id,
                 "status": "preflight_failed",
                 "exit_code": doctor_code,
+                "model": model,
+                "effort": effort,
                 "max_parallel": max_parallel,
                 "job_count": len(jobs),
                 "jobs_completed": 0,
@@ -1557,6 +1652,7 @@ def _dispatch_batch(
             code, lane_summary = _dispatch(
                 job["request"],
                 job["preset"],
+                model=model,
                 agy=agy,
                 schema=schema,
                 reducer=reducer,
@@ -1569,11 +1665,11 @@ def _dispatch_batch(
             )
         except HelperError as exc:
             code = exc.code
-            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=exc.message)
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", model=model, effort=effort, error=exc.message)
             emit_lane(job["job_id"], lane_summary)
         except Exception as exc:
             code = EXIT_DISPATCH_FAILED
-            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=_bounded_text(exc))
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", model=model, effort=effort, error=_bounded_text(exc))
             emit_lane(job["job_id"], lane_summary)
         completed_queue.put((index, code, lane_summary))
 
@@ -1581,7 +1677,7 @@ def _dispatch_batch(
         while pending:
             index = pending.pop(0)
             job = jobs[index]
-            lane_summary = _batch_terminal_summary(job, status, error=error)
+            lane_summary = _batch_terminal_summary(job, status, model=model, effort=effort, error=error)
             results[index] = (EXIT_DISPATCH_FAILED, lane_summary)
             emit_lane(job["job_id"], lane_summary)
 
@@ -1622,7 +1718,7 @@ def _dispatch_batch(
                 except Exception as exc:
                     active.pop(index, None)
                     code = EXIT_DISPATCH_FAILED
-                    lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=_bounded_text(exc))
+                    lane_summary = _batch_terminal_summary(job, "dispatch_failed", model=model, effort=effort, error=_bounded_text(exc))
                     results[index] = (code, lane_summary)
                     emit_lane(job["job_id"], lane_summary)
 
@@ -1650,7 +1746,7 @@ def _dispatch_batch(
             mark_pending("cancelled")
     for index, job in enumerate(jobs):
         if index not in results:
-            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error="lane did not produce a terminal summary")
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", model=model, effort=effort, error="lane did not produce a terminal summary")
             results[index] = (EXIT_DISPATCH_FAILED, lane_summary)
             emit_lane(job["job_id"], lane_summary)
 
@@ -1670,6 +1766,8 @@ def _dispatch_batch(
         "batch_id": batch_id,
         "status": batch_status,
         "exit_code": batch_exit_code,
+        "model": model,
+        "effort": effort,
         "max_parallel": max_parallel,
         "job_count": len(jobs),
         "jobs_completed": sum(status == "completed" for status in statuses),
@@ -1687,6 +1785,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser("doctor", help="probe agy, model, Python, and reducer readiness")
     doctor.add_argument("--json", action="store_true", help="emit stable machine-readable JSON")
+    doctor.add_argument("--model", default=DEFAULT_MODEL, help=f"exact Agy model ID (default: {DEFAULT_MODEL})")
     doctor.add_argument("--agy", help="explicit agy executable, primarily for controlled fixtures")
 
     run = subparsers.add_parser("run", help="create a task contract and dispatch one preset")
@@ -1694,6 +1793,7 @@ def _build_parser() -> argparse.ArgumentParser:
     requests = run.add_mutually_exclusive_group(required=True)
     requests.add_argument("--request-stdin", action="store_true", help="read one bounded UTF-8 JSON line from stdin")
     requests.add_argument("--request-file", help="read a bounded UTF-8 JSON object from a file")
+    run.add_argument("--model", default=DEFAULT_MODEL, help=f"exact Agy model ID (default: {DEFAULT_MODEL})")
     run.add_argument("--agy", help="explicit agy executable, primarily for controlled fixtures")
     run.add_argument(
         "--run-timeout",
@@ -1706,6 +1806,7 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_requests = batch.add_mutually_exclusive_group(required=True)
     batch_requests.add_argument("--request-stdin", action="store_true", help="read one bounded UTF-8 JSON line from stdin")
     batch_requests.add_argument("--request-file", help="read a bounded UTF-8 JSON object from a file")
+    batch.add_argument("--model", default=DEFAULT_MODEL, help=f"exact Agy model ID (default: {DEFAULT_MODEL})")
     batch.add_argument("--agy", help="explicit agy executable, primarily for controlled fixtures")
     batch.add_argument(
         "--run-timeout",
@@ -1721,7 +1822,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "doctor":
-            code, result = _doctor(args.agy)
+            code, result = _doctor(args.agy, model=args.model)
             # JSON is the stable interface; --json is retained as the
             # documented spelling and the no-flag form stays useful in a
             # terminal without introducing a second human output protocol.
@@ -1729,11 +1830,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return code
         request = _read_request(args)
         if args.command == "batch":
-            code, _ = _dispatch_batch(request, agy=args.agy, run_timeout=args.run_timeout)
+            code, _ = _dispatch_batch(
+                request,
+                model=args.model,
+                agy=args.agy,
+                run_timeout=args.run_timeout,
+            )
         else:
             code, _ = _dispatch(
                 request,
                 args.preset,
+                model=args.model,
                 agy=args.agy,
                 run_timeout=args.run_timeout,
             )

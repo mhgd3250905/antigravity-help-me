@@ -6,7 +6,7 @@ reducer 复用或合并 lane。单 lane 的 Agy 仍是前台子进程，宿主�
 最终验收。
 
 命令优先调用应使用 `scripts/agy_helper.py` 的 `doctor` → `run` fast path；多个独立
-任务使用 helper 的 `batch` fast path；helper
+任务使用 helper 的 `batch` fast path（支持 `--model` 统一指定批次模型，批次内所有 job 共享同一模型）；helper
 会逐行转发 reducer 的 compact JSON 事件，并在连续 75 秒无可见输出且 producer 仍在运行时发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算），保存 raw stream，并对本次精确的
 producer/reducer 子进程施加有界 timeout。本文下面的直接管道和 TASK/argv 示例是
 helper 不可用时的手工 fallback。不要把 raw stream 直接接入宿主上下文。
@@ -29,14 +29,15 @@ Read the task contract at "<ABS_TASK_PATH>" in full before acting. Execute exact
 执行配置必须明确区分：
 
 ```text
-REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
-REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
-CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+REVIEW_LOCAL:    agy --add-dir <ABS_WORKSPACE> --mode plan --model gemini-3.8-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+REVIEW_EXTERNAL: agy --add-dir <ABS_WORKSPACE> --model gemini-3.8-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
+CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemini-3.8-flash-high --effort high --output-format stream-json --json-schema <ABS_SCHEMA> --print-timeout <DURATION> -p <FIXED_PROMPT>
 ```
 
-每次启动都显式传 `--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy
-1.1.22 对该模型只接受省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生
-model selection conflict。无论 fast path 还是手工 fallback，默认均不强加微观工具调用预算、读取 allowlist 或额外停止条件；只有用户显式提供时才注入作为 prompt-level constraints。未显式提供预算时，工具计数仅用于可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
+每次启动都显式传推导的 `--effort`。技能默认模型为 `gemini-3.8-flash-high` 与 `--effort high`；
+支持通过 `--model` 传入精确 Agy 模型 ID，并由 `-high`/`-medium`/`-low` 后缀确定性推导 effort；
+Agy 对模型只接受省略 `--effort` 或匹配的 effort，不匹配会产生 model selection conflict。无法确定 effort 的模型会被拒绝。
+无论 fast path 还是手工 fallback，默认均不强加微观工具调用预算、读取 allowlist 或额外停止条件；只有用户显式提供时才注入作为 prompt-level constraints。未显式提供预算时，工具计数仅用于可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
 `--effort low|medium|high`。
 
 `--json-schema` 必须是 Agy 进程可读的绝对文件路径，推荐直接指向本技能的
@@ -51,7 +52,7 @@ Windows PowerShell（以下是 `REVIEW_LOCAL` 的可执行形状；`py -3` 可�
 ```powershell
 $agyExitFile = Join-Path $taskDir 'agy-exit.txt'
 & {
-  & agy.exe --add-dir $workspace --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema $schema --print-timeout 1800s -p $prompt 2> $stderr
+  & agy.exe --add-dir $workspace --mode plan --model gemini-3.8-flash-high --effort high --output-format stream-json --json-schema $schema --print-timeout 1800s -p $prompt 2> $stderr
   [IO.File]::WriteAllText($agyExitFile, [string]$LASTEXITCODE)
 } |
   py -3 $reducer --task-id $taskId --task-mode REVIEW --execution-profile REVIEW_LOCAL --required-tool view_file --workspace $workspace --state $state --raw-log $rawLog --heartbeat-seconds 75 --max-updates 12 --max-output-bytes 2048
@@ -74,7 +75,7 @@ POSIX shell（同样以 `REVIEW_LOCAL` 为例）：
 
 ```sh
 AGY_EXIT_FILE="$TASK_DIR/agy-exit.txt"
-{ agy --add-dir "$WORKSPACE" --mode plan --model gemini-3.7-flash-high --effort high --output-format stream-json --json-schema "$SCHEMA" --print-timeout 1800s -p "$PROMPT" 2>"$STDERR"; printf '%s\n' "$?" >"$AGY_EXIT_FILE"; } |
+{ agy --add-dir "$WORKSPACE" --mode plan --model gemini-3.8-flash-high --effort high --output-format stream-json --json-schema "$SCHEMA" --print-timeout 1800s -p "$PROMPT" 2>"$STDERR"; printf '%s\n' "$?" >"$AGY_EXIT_FILE"; } |
   python3 "$REDUCER" --task-id "$TASK_ID" --task-mode REVIEW --execution-profile REVIEW_LOCAL --required-tool view_file --workspace "$WORKSPACE" --state "$STATE" --raw-log "$RAW_LOG" --heartbeat-seconds 75 --max-updates 12 --max-output-bytes 2048
 REDUCER_EXIT=$?
 AGY_EXIT=$(cat "$AGY_EXIT_FILE")
@@ -193,7 +194,7 @@ conversation 或停止请求主会话决定；不能静默续接固定的错误 
 
 - `REVIEW` 默认不带 `--dangerously-skip-permissions`。只有本地代码的只读规划/
   审查适合 `--mode=plan`；外部研究不要套用 plan，以免隐藏 web 工具。
-- 不要把 `--mode=plan` 与 `--disable-slash-commands` 组合；Agy 1.1.22 会警告 plan
+- 不要把 `--mode=plan` 与 `--disable-slash-commands` 组合；Agy 1.1.24 会警告 plan
   无效，因为该 mode 依赖 `/plan` expansion。
 - `CHANGE` 使用 `--mode=accept-edits`。只有目标 workspace 可信、用户已经授权
   写入和命令、且 headless 确实需要非交互权限时，才额外使用

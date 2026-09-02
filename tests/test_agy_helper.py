@@ -35,7 +35,7 @@ import time
 
 args = sys.argv[1:]
 if "--version" in args:
-    print("agy 1.1.22")
+    print("agy 1.1.24")
     raise SystemExit(0)
 if "--help" in args:
     print("""Usage: agy
@@ -52,7 +52,7 @@ if "--help" in args:
 """)
     raise SystemExit(0)
 if args[:3] == ["--output-format", "json", "models"]:
-    print(json.dumps({"command": {"data": {"models": [{"id": "gemini-3.7-flash-high"}]}}}))
+    print(json.dumps({"command": {"data": {"models": [{"id": "gemini-3.8-flash-high"}, {"id": "gemini-3.8-flash-medium"}, {"id": "gemini-3.8-flash-low"}, {"id": "custom-model-high"}]}}}))
     raise SystemExit(0)
 
 workspace = pathlib.Path(args[args.index("--add-dir") + 1])
@@ -61,10 +61,11 @@ task_path = pathlib.Path(prompt.split('"')[1])
 task_id = task_path.parent.name
 task_text = task_path.read_text(encoding="utf-8")
 tools = ["view_file", "search_web"]
+model_name = args[args.index("--model") + 1] if "--model" in args else "gemini-3.8-flash-high"
 print(json.dumps({
     "type": "init",
     "cwd": str(workspace),
-    "model": "gemini-3.7-flash-high",
+    "model": model_name,
     "permission_mode": "request-review",
     "conversation_id": "fake-conversation",
     "tools": tools,
@@ -116,7 +117,7 @@ import time
 
 args = sys.argv[1:]
 if "--version" in args:
-    print("agy 1.1.22")
+    print("agy 1.1.24")
     raise SystemExit(0)
 if "--help" in args:
     print("""Usage: agy
@@ -133,7 +134,7 @@ if "--help" in args:
 """)
     raise SystemExit(0)
 if args[:3] == ["--output-format", "json", "models"]:
-    print(json.dumps({"command": {"data": {"models": [{"id": "gemini-3.7-flash-high"}]}}}))
+    print(json.dumps({"command": {"data": {"models": [{"id": "gemini-3.8-flash-high"}, {"id": "gemini-3.8-flash-medium"}, {"id": "gemini-3.8-flash-low"}, {"id": "custom-model-high"}]}}}))
     raise SystemExit(0)
 
 workspace = pathlib.Path(args[args.index("--add-dir") + 1])
@@ -144,6 +145,7 @@ task_text = task_path.read_text(encoding="utf-8")
 goal = next((line.split("：", 1)[1] for line in task_text.splitlines() if line.startswith("- 目标：")), "")
 control = os.environ.get("FAKE_BATCH_CONTROL")
 control_path = pathlib.Path(control) if control else None
+model_name = args[args.index("--model") + 1] if "--model" in args else "gemini-3.8-flash-high"
 
 def record(kind):
     if not control_path:
@@ -158,7 +160,7 @@ record("start")
 print(json.dumps({
     "type": "init",
     "cwd": str(workspace),
-    "model": "gemini-3.7-flash-high",
+    "model": model_name,
     "permission_mode": "request-review",
     "conversation_id": "batch-fake-" + task_id,
     "tools": [],
@@ -610,7 +612,7 @@ class HelperContractTests(unittest.TestCase):
             # Untested version with complete capabilities must be ready with compatible_unverified, not blocked.
             script_new_ver = folder / "fake_new_ver.py"
             script_new_ver.write_text(
-                (folder / "fake_agy.py").read_text(encoding="utf-8").replace("1.1.22", "1.1.23", 1),
+                (folder / "fake_agy.py").read_text(encoding="utf-8").replace("1.1.24", "1.1.25", 1),
                 encoding="utf-8",
             )
             untested = subprocess.run(
@@ -631,7 +633,7 @@ class HelperContractTests(unittest.TestCase):
             script = folder / "fake_no_model.py"
             script.write_text(
                 (folder / "fake_agy.py").read_text(encoding="utf-8").replace(
-                    "gemini-3.7-flash-high", "other-model", 1
+                    "gemini-3.8-flash-high", "other-model", 1
                 ),
                 encoding="utf-8",
             )
@@ -1172,6 +1174,392 @@ class HelperContractTests(unittest.TestCase):
             self.assertGreaterEqual(len(heartbeats), 1, "Helper must emit heartbeat even when reducer budget is exhausted")
             last_hb = heartbeats[-1]
             self.assertEqual(last_hb["tools"].get("view_file"), 25)
+
+    def test_derive_effort_valid_and_invalid_suffixes(self) -> None:
+        from scripts import agy_helper
+
+        self.assertEqual(agy_helper._derive_effort("gemini-3.8-flash-high"), "high")
+        self.assertEqual(agy_helper._derive_effort("gemini-3.8-flash-medium"), "medium")
+        self.assertEqual(agy_helper._derive_effort("gemini-3.8-flash-low"), "low")
+        self.assertEqual(agy_helper._derive_effort("custom-model-high"), "high")
+        self.assertEqual(agy_helper._derive_effort("custom-model-medium"), "medium")
+        self.assertEqual(agy_helper._derive_effort("custom-model-low"), "low")
+        self.assertEqual(agy_helper._derive_effort("  gemini-3.8-flash-high  "), "high")
+        self.assertEqual(agy_helper._normalize_model("  gemini-3.8-flash-high  "), "gemini-3.8-flash-high")
+
+        for invalid in (
+            "gemini-3.8-flash",
+            "gemini-3.8-pro",
+            "custom-model",
+            "gemini-3.8-flash-high-extra",
+            "gemini-3.8-flash-HIGH",
+            "gemini-3.8\n-flash-high",
+            "gemini-3.8`flash-high",
+            "",
+            "   ",
+            None,
+            123,
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(agy_helper.HelperError) as ctx:
+                    agy_helper._derive_effort(invalid)  # type: ignore
+                self.assertEqual(ctx.exception.code, agy_helper.EXIT_REQUEST_INVALID)
+
+    def test_doctor_model_selection_and_rejections(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-doctor-models-") as raw:
+            folder = Path(raw)
+            agy = _make_fake_agy(folder)
+
+            # Default model is gemini-3.8-flash-high
+            default_run = subprocess.run(
+                [sys.executable, str(HELPER), "doctor", "--json", "--agy", str(agy)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(default_run.returncode, 0, default_run.stderr)
+            default_res = json.loads(default_run.stdout)
+            self.assertEqual(default_res["status"], "ready")
+            self.assertEqual(default_res["models"]["required"], "gemini-3.8-flash-high")
+            self.assertTrue(default_res["models"]["available"])
+            self.assertEqual(default_res["tested_baseline"]["model"], "gemini-3.8-flash-high")
+            self.assertEqual(default_res["tested_baseline"]["agy_version"], "1.1.24")
+
+            # Custom model available
+            custom_run = subprocess.run(
+                [sys.executable, str(HELPER), "doctor", "--json", "--model", "custom-model-high", "--agy", str(agy)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(custom_run.returncode, 0, custom_run.stderr)
+            custom_res = json.loads(custom_run.stdout)
+            self.assertEqual(custom_res["status"], "ready")
+            self.assertEqual(custom_res["models"]["required"], "custom-model-high")
+            self.assertTrue(custom_res["models"]["available"])
+
+            # Unavailable model with valid suffix
+            unavail_run = subprocess.run(
+                [sys.executable, str(HELPER), "doctor", "--json", "--model", "unknown-model-high", "--agy", str(agy)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(unavail_run.returncode, 13)
+            unavail_res = json.loads(unavail_run.stdout)
+            self.assertEqual(unavail_res["status"], "blocked")
+            self.assertIn("model_unavailable", unavail_res["problems"])
+            self.assertEqual(unavail_res["models"]["required"], "unknown-model-high")
+            self.assertFalse(unavail_res["models"]["available"])
+            self.assertEqual(unavail_res["next_action"], "make_required_model_available")
+
+            # Invalid model suffix
+            invalid_run = subprocess.run(
+                [sys.executable, str(HELPER), "doctor", "--json", "--model", "gemini-3.8-pro", "--agy", str(agy)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(invalid_run.returncode, 20)
+            invalid_res = json.loads(invalid_run.stdout)
+            self.assertEqual(invalid_res["event"], "error")
+            self.assertEqual(invalid_res["code"], 20)
+            self.assertIn("cannot determine effort", invalid_res["message"])
+
+    def test_run_configurable_model_and_effort_and_preflight(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-run-model-") as raw:
+            root = Path(raw) / "workspace"
+            root.mkdir()
+            fake_dir = Path(raw) / "fake"
+            fake_dir.mkdir()
+            agy = _make_fake_agy(fake_dir)
+            request = _base_request(root)
+
+            # 1. Default model run
+            default_run = subprocess.run(
+                [sys.executable, str(HELPER), "run", "--preset", "review-local", "--request-stdin", "--agy", str(agy)],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(default_run.returncode, 0, default_run.stderr)
+            events = [json.loads(line) for line in default_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["model"], "gemini-3.8-flash-high")
+            self.assertEqual(summary["effort"], "high")
+            task_path = Path(summary["task_path"])
+            task_text = task_path.read_text(encoding="utf-8")
+            self.assertIn("gemini-3.8-flash-high", task_text)
+            self.assertIn("--effort high", task_text)
+            launch = json.loads((task_path.parent / "launch.json").read_text(encoding="utf-8"))
+            self.assertEqual(launch["model"], "gemini-3.8-flash-high")
+            self.assertEqual(launch["effort"], "high")
+            self.assertIn("--model", launch["agy_argv"])
+            self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-high")
+            self.assertIn("--effort", launch["agy_argv"])
+            self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "high")
+
+            # 2. Custom model run with medium effort
+            custom_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "run",
+                    "--preset",
+                    "review-local",
+                    "--model",
+                    "gemini-3.8-flash-medium",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(custom_run.returncode, 0, custom_run.stderr)
+            events = [json.loads(line) for line in custom_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["model"], "gemini-3.8-flash-medium")
+            self.assertEqual(summary["effort"], "medium")
+            task_path = Path(summary["task_path"])
+            task_text = task_path.read_text(encoding="utf-8")
+            self.assertIn("gemini-3.8-flash-medium", task_text)
+            self.assertIn("--effort medium", task_text)
+            launch = json.loads((task_path.parent / "launch.json").read_text(encoding="utf-8"))
+            self.assertEqual(launch["model"], "gemini-3.8-flash-medium")
+            self.assertEqual(launch["effort"], "medium")
+            self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-medium")
+            self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "medium")
+
+            # 3. Unavailable model preflight failure
+            unavail_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "run",
+                    "--preset",
+                    "review-local",
+                    "--model",
+                    "unavailable-model-low",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(unavail_run.returncode, 13)
+            events = [json.loads(line) for line in unavail_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["status"], "preflight_failed")
+            self.assertEqual(summary["model"], "unavailable-model-low")
+            self.assertEqual(summary["effort"], "low")
+            self.assertIn("model_unavailable", summary["problems"])
+
+            # 4. Invalid model suffix
+            invalid_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "run",
+                    "--preset",
+                    "review-local",
+                    "--model",
+                    "gemini-3.8-flash",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(invalid_run.returncode, 20)
+            err_res = json.loads(invalid_run.stdout)
+            self.assertEqual(err_res["event"], "error")
+            self.assertEqual(err_res["code"], 20)
+            self.assertIn("cannot determine effort", err_res["message"])
+
+    def test_batch_configurable_model_and_effort_and_preflight(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-model-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {
+                "batch_id": "batch-model-test",
+                "jobs": [_batch_job(workspace, f"job-{index} sleep=0.05") for index in range(2)],
+            }
+
+            # 1. Default model batch
+            default_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "batch",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                    "--run-timeout",
+                    "2",
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(default_run.returncode, 0, default_run.stderr)
+            events = [json.loads(line) for line in default_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["event"], "batch")
+            self.assertEqual(summary["model"], "gemini-3.8-flash-high")
+            self.assertEqual(summary["effort"], "high")
+            for job in summary["jobs"]:
+                self.assertEqual(job["model"], "gemini-3.8-flash-high")
+                self.assertEqual(job["effort"], "high")
+                task_dir = Path(job["task_dir"])
+                launch = json.loads((task_dir / "launch.json").read_text(encoding="utf-8"))
+                self.assertEqual(launch["model"], "gemini-3.8-flash-high")
+                self.assertEqual(launch["effort"], "high")
+                self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-high")
+                self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "high")
+                task_text = (task_dir / "TASK.md").read_text(encoding="utf-8")
+                self.assertIn("gemini-3.8-flash-high", task_text)
+                self.assertIn("--effort high", task_text)
+
+            # 2. Custom model batch
+            custom_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "batch",
+                    "--model",
+                    "gemini-3.8-flash-low",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                    "--run-timeout",
+                    "2",
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(custom_run.returncode, 0, custom_run.stderr)
+            events = [json.loads(line) for line in custom_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["model"], "gemini-3.8-flash-low")
+            self.assertEqual(summary["effort"], "low")
+            for job in summary["jobs"]:
+                self.assertEqual(job["model"], "gemini-3.8-flash-low")
+                self.assertEqual(job["effort"], "low")
+                task_dir = Path(job["task_dir"])
+                launch = json.loads((task_dir / "launch.json").read_text(encoding="utf-8"))
+                self.assertEqual(launch["model"], "gemini-3.8-flash-low")
+                self.assertEqual(launch["effort"], "low")
+                self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-low")
+                self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "low")
+
+            # 3. Unavailable model preflight batch
+            unavail_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "batch",
+                    "--model",
+                    "unavailable-model-medium",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                    "--run-timeout",
+                    "2",
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(unavail_run.returncode, 13)
+            events = [json.loads(line) for line in unavail_run.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["status"], "preflight_failed")
+            self.assertEqual(summary["model"], "unavailable-model-medium")
+            self.assertEqual(summary["effort"], "medium")
+            self.assertIn("model_unavailable", summary["problems"])
+            for job in summary["jobs"]:
+                self.assertEqual(job["status"], "preflight_failed")
+                self.assertEqual(job["model"], "unavailable-model-medium")
+                self.assertEqual(job["effort"], "medium")
+
+            # 4. Invalid model suffix batch
+            invalid_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "batch",
+                    "--model",
+                    "custom-model",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                    "--run-timeout",
+                    "2",
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(invalid_run.returncode, 20)
+            err_res = json.loads(invalid_run.stdout)
+            self.assertEqual(err_res["event"], "error")
+            self.assertEqual(err_res["code"], 20)
+            self.assertIn("cannot determine effort", err_res["message"])
 
 
 if __name__ == "__main__":

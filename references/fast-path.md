@@ -10,27 +10,27 @@
 从本仓库运行：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py doctor --json
+python <ABS_REPO>\scripts\agy_helper.py doctor --json [--model <MODEL_ID>]
 ```
 
 Windows 也可以用已验证的 `py -3`。`doctor` 只读检查：
 
 - `agy` 是否存在且可运行；
-- `agy --version`：版本 `1.1.22` 标记为 `tested`；其他版本若能力齐全则 `status=ready` 且 `compatibility=compatible_unverified`，不硬阻断；
+- `agy --version`：版本 `1.1.24` 标记为 `tested`；其他版本若能力齐全则 `status=ready` 且 `compatibility=compatible_unverified`，不硬阻断；
 - `agy --help` 是否包含工作区、mode、print、model、effort、stream/json、schema、
   timeout、conversation 和按需权限参数；
 - `agy --output-format json models` 是否成功且精确包含
-  `gemini-3.7-flash-high`；
+  选定模型（默认 `gemini-3.8-flash-high`，执行精确可用性检查）；
 - 当前 Python 以及本仓库 `scripts\agy_stream_reducer.py --help` 是否可用。
 
-输出是单行稳定 JSON。`doctor` 仅在 agy 缺失或不可运行、必需 CLI 能力缺失、固定模型不可用、Python/reducer 不可用时 blocked。`status=ready` 时即可进入 `run`；若有阻断按 `next_action` 处理。退出码是稳定分类码，不能用安装、更新或登录来自动修复。
+输出是单行稳定 JSON。`doctor` 仅在 agy 缺失或不可运行、必需 CLI 能力缺失、选定模型不可用、Python/reducer 不可用或模型无法确定 effort 时 blocked/error。`status=ready` 时即可进入 `run`；若有阻断按 `next_action` 处理。退出码是稳定分类码，不能用安装、更新或登录来自动修复。
 
 ## 2. 用 run preset
 
-请求正文优先通过 stdin 发送一行 UTF-8 JSON：
+请求正文优先通过 stdin 发送一行 UTF-8 JSON（支持 `--model`，默认 `gemini-3.8-flash-high`，由 `-high`/`-medium`/`-low` 后缀确定性推导 `--effort`）：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin
+python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin [--model <MODEL_ID>]
 ```
 
 stdin framing 是“一行一个 JSON 对象”；helper 只读取有界的一行，不等待 EOF，
@@ -38,7 +38,7 @@ stdin framing 是“一行一个 JSON 对象”；helper 只读取有界的一�
 固定启动 prompt。需要文件输入时使用：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-file <ABS_REQUEST_JSON>
+python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-file <ABS_REQUEST_JSON> [--model <MODEL_ID>]
 ```
 
 两种输入必须二选一。普通最小请求只包含：
@@ -72,11 +72,11 @@ Preset 映射：
 
 ## 3. 用 batch 提交独立任务
 
-需要一次提交多个独立任务时使用：
+需要一次提交多个独立任务时使用（支持 `--model` 统一指定批次模型，批次内所有 job 使用同一选定模型）：
 
 ```text
-python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin
-python <ABS_REPO>\scripts\agy_helper.py batch --request-file <ABS_BATCH_JSON>
+python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin [--model <MODEL_ID>]
+python <ABS_REPO>\scripts\agy_helper.py batch --request-file <ABS_BATCH_JSON> [--model <MODEL_ID>]
 ```
 
 batch 输入是一个有界 UTF-8 JSON 对象。每项必须明确 `preset` 和原有 `request`；
@@ -161,8 +161,9 @@ reducer-exit.txt
 run.json
 ```
 
-helper 使用 argv 数组从 workspace 启动 Agy，同时传入 `--add-dir`、固定模型
-`gemini-3.7-flash-high`、`--effort high`、schema、`stream-json` 和 print timeout。
+helper 使用 argv 数组从 workspace 启动 Agy，同时传入 `--add-dir`、选定模型
+（默认 `gemini-3.8-flash-high`）、推导的 `--effort`（默认 `high`）、schema、`stream-json` 和 print timeout。
+TASK.md、launch.json 以及 run/batch 汇总均记录选定 model 与 effort。
 `REVIEW_LOCAL` 使用 `--mode plan`，`REVIEW_EXTERNAL` 省略 mode，`CHANGE` 使用
 `--mode accept-edits`。默认不传 `--dangerously-skip-permissions`。
 

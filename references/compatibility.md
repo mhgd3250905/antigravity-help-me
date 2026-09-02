@@ -7,9 +7,9 @@
 优先运行 `python <ABS_REPO>\scripts\agy_helper.py doctor --json`，再用
 `run --preset ... --request-stdin`/`--request-file`；多个独立任务可用
 `batch --request-stdin`/`--request-file`。helper 使用标准库，作为 bridge-first 入口负责
-版本/model/help/reducer 预检（版本 1.1.22 标记 tested，其他版本若能力齐全则 compatible_unverified 可继续）、绝对 workspace 任务书和精确 producer/reducer
+版本/model/help/reducer 预检（版本 1.1.24 标记 tested，对选定模型做精确可用性检查，其他版本若能力齐全则 compatible_unverified 可继续）、绝对 workspace 任务书和精确 producer/reducer
 argv。长请求只通过有界 UTF-8 stdin/file 进入 helper，不放进 argv 或环境变量。当 `--request-stdin` 连接交互式 TTY 时，helper 在读取前临时关闭输入 echo 并在成功、解析失败与异常路径可靠恢复（兼容 Windows Console/ConPTY 与 POSIX）；无法切换时不破坏输入并建议使用 `--request-file`。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。默认无微观工具/预算限制。
-`batch` 的 `max_parallel` 只能为 `1..3`，每个 lane 独立运行；这个上限不跨 helper
+`batch` 的 `max_parallel` 只能为 `1..3`，批次内所有 job 使用同一选定模型（one model per batch），每个 lane 独立运行；这个上限不跨 helper
 进程或终端共享。命令优先接口、五个 preset、timeout 和退出语义见
 [fast-path.md](fast-path.md)；本页其余内容描述 helper 不可用时的手工 fallback。
 
@@ -33,16 +33,17 @@ argv。长请求只通过有界 UTF-8 stdin/file 进入 helper，不放进 argv 
 
 - 调度命令从目标 workspace 的绝对路径启动，并显式传入
   `--add-dir <ABS_WORKSPACE>`；`--add-dir` 不会改变 Agy 的 `cwd`。
-- `init.cwd` 的规范化绝对路径必须与期望 workspace 完全一致；Agy 1.1.22 不提供
+- `init.cwd` 的规范化绝对路径必须与期望 workspace 完全一致；Agy 1.1.24 不提供
   可依赖的 added-dir 证明字段，无法证明时停止，不以任意 metadata、模型文字或
   退出码代替绑定证明。
 - 执行配置必须明确三态：本地只读 `REVIEW_LOCAL` 使用 `--mode plan`，外部/工具型
   `REVIEW_EXTERNAL` 省略 `--mode`，`CHANGE` 使用 `--mode accept-edits`。reducer
   调用同时传入与 TASK.md 一致的 `--task-mode REVIEW|CHANGE` 和相应
   `--execution-profile`；resume/project 再传 expected id 供 init 校验。
-- Agy 启动命令三个执行配置都必须显式传 `--effort high`。技能固定模型为
-  `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
-  `high`，`low`/`medium` 会产生 model selection conflict。若需要控制成本，由用户
+- Agy 启动命令三个执行配置都必须显式传由选定模型推导的 `--effort`。技能默认模型为
+  `gemini-3.8-flash-high` 与 `--effort high`；支持通过 `--model` 传入精确 Agy 模型 ID，
+  并从 `-high`/`-medium`/`-low` 后缀确定性推导 effort；Agy 对模型只接受省略 `--effort` 或匹配的
+  effort，不匹配会产生 model selection conflict。无法确定 effort 的模型会被拒绝。若需要控制成本，由用户
   显式提供的 prompt-level allowlist、工具调用预算或停止条件控制（未显式提供时不设默认限制；
   工具计数仅用于可观测性，宿主不得自行发明上限或因此停机）。兼容性探测的 `agy --help` 必须确认
   `--effort low|medium|high`；不支持时停止，不静默省略或替换该策略。

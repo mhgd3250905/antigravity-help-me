@@ -1,4 +1,4 @@
 interface:
   display_name: "Antigravity Help Me"
-  short_description: "先诊断环境，再用 preset 调用本机 Antigravity CLI 完成任务并验收"
-  default_prompt: "使用 $antigravity-help-me 先运行 scripts/agy_helper.py doctor --json，随后通过 stdin JSON 选择 preset 派发单个或独立 batch 任务；helper 自动保留 TASK.md、结构化结果和低噪声监督证据。"
+  short_description: "先诊断环境与模型，再用 preset 调用本机 Antigravity CLI 完成任务并验收"
+  default_prompt: "使用 $antigravity-help-me 先运行 scripts/agy_helper.py doctor --json [--model <MODEL_ID>]，默认使用 gemini-3.8-flash-high 并支持可选模型，随后通过 stdin JSON 选择 preset 派发单个或独立 batch 任务；helper 自动保留 TASK.md、结构化结果和低噪声监督证据。"
