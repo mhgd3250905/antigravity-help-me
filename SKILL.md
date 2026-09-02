@@ -9,7 +9,7 @@ description: "在本机 Antigravity CLI (agy) 可用时，用 bridge-first 命�
 当作一次只执行一件明确任务的执行工位。本技能为 bridge-first 设计：核心只做好
 主会话向 Agy 转发完整任务、实时监督、保存证据并把结构化结果带回主会话。
 首选 `scripts/agy_helper.py` 命令优先入口：固定环境判断和命令装配由 helper 完成，
-任务契约仍自动落盘，终态必须符合本技能的 JSON schema。默认不生成或强加工具调用预算与读取限制。
+任务契约仍自动落盘，终态必须符合本技能的 JSON schema。工具调用预算、读取 allowlist 和额外停止条件仅为用户显式 opt-in；未显式提供预算时，工具计数仅用于可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。
 
 ## 命令优先入口
 
@@ -30,7 +30,7 @@ python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdi
 ```
 
 也可用 `--request-file <ABS_REQUEST_JSON>`。普通最小请求只包含
-`workspace`、`goal`、`scope`、`acceptance`；默认 `required_tools` 为空，不强加工具预算或 allowlist。
+`workspace`、`goal`、`scope`、`acceptance`；默认 `required_tools` 为空，不强加工具预算、读取 allowlist 或额外停止条件。
 当 `--request-stdin` 连接交互式 TTY 时，helper 会临时关闭终端 echo 并在退出时可靠恢复（兼容 Windows Console/ConPTY 与 POSIX；无法切换时不破坏输入并建议使用 `--request-file`）。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。
 helper 会安全生成 task id、内部 TASK.md、固定 Agy/reducer argv、state/raw log 和退出码证据。
 正文不进入命令行参数、环境变量或固定 prompt，因此不会受到 Windows 终端参数长度限制。
@@ -119,8 +119,8 @@ MODE: REVIEW | CHANGE
 输入与证据：已确认事实、绝对路径、证据失效条件
 已定决策：主会话已确定的行为、架构和优先级
 范围与步骤：允许操作的位置、明确排除项、必要顺序和停止条件
-读取/检查 allowlist：允许读取的精确路径或模式（未列出的路径不得读取）
-工具调用预算：每个工具的最大调用次数、达到预算后的停止条件
+读取/检查 allowlist：（可选，仅在用户显式提供时包含）允许读取的精确路径或模式
+工具调用预算：（可选，仅在用户显式提供时包含）每个工具的最大调用次数、达到预算后的停止条件
 验收：必须运行的检查、预期结果和最终门禁
 授权与禁止项：允许的修改和副作用；必须停下确认的动作
 返回：结论、改动或发现、逐项证据、阻塞和下一步
@@ -132,8 +132,10 @@ TASK.md 是调度后的不可变契约。纠偏时创建新的 task id 和 TASK.
 `.git/info/exclude`，不要擅自修改项目 `.gitignore`。
 
 Agy CLI 1.1.22 没有 `--max-turns`；读取/检查 allowlist、工具调用预算和停止条件
-只能作为 TASK.md 的 prompt-level 约束。宿主必须依据 compact supervision 判断是否
-超限，并停止当前 session 或创建窄范围返修任务，不能把不存在的 CLI flag 当作硬门禁。
+仅在用户显式提供时作为 TASK.md 的 prompt-level 约束注入。若用户显式配置了预算，宿主依据
+compact supervision 判断是否超限并停止当前 session 或创建窄范围返修任务，不能把不存在的
+CLI flag 当作硬门禁。未显式提供预算时，工具计数仅作可观测性展示，不构成 fail-closed 或停机条件，
+宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。
 
 ## 手工 fallback：工作区绑定与原生调度
 
@@ -158,7 +160,7 @@ Read the task contract at "<ABS_TASK_PATH>" in full before acting. Execute exact
 使用 argv 数组逐参数传递；Agy 启动命令三个执行配置都必须显式传入
 `--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受
 省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生 model selection conflict。
-成本由读取/检查 allowlist、prompt-level 工具调用预算和停止条件控制。
+若需要控制成本，由用户显式提供的读取/检查 allowlist、prompt-level 工具调用预算或停止条件控制（未显式提供时不强加限制）。
 reducer 调用必须带与 TASK.md 一致的
 `--task-mode REVIEW|CHANGE` 和 `--execution-profile REVIEW_LOCAL|REVIEW_EXTERNAL|CHANGE`
 （以及按需重复的 `--required-tool`）。显式续接或指定 project 时再传
@@ -232,7 +234,8 @@ text delta、tool output 或 `response` 原文灌入主会话。监督规则和�
 近期事件见 [references/stream-supervision.md](references/stream-supervision.md)。工具
 `count`/`state.tools` 是按 `conversation_id + step_index + tool_name`（或明确
 tool-call id）去重后的 unique invocation 数，不是 stream event 数；无稳定 identity
-时按每次观察保守计数，避免按工具名错误合并不同调用。
+时按每次观察保守计数，避免按工具名错误合并不同调用。未显式配置 tool_budget 时，工具计数
+纯粹用于可观测性，不构成 fail-closed 或停机条件。
 
 完成门禁：不能只看退出码、`SUCCESS`、conversation id、文件存在或“看起来完成”。
 必须确认 final protocol 为结构化 `completed`，读取 TASK.md 要求，检查实际文件/Git

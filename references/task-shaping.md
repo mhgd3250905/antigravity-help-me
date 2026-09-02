@@ -42,10 +42,11 @@ Gemini Flash High 擅长快速完成确定任务，不代替主会话作开放�
 - “全面研究”改成有限问题、证据入口和返回格式。
 - “整理代码”改成具体缺陷、目标行为、文件范围和测试。
 - “你决定”改成主会话已选方案；只允许 Agy 决定不影响契约的局部实现细节。
-- 对本地审查列出读取/检查 allowlist（精确路径或有限模式），并为每个工具写明最大
-  调用次数；达到预算或发现首个足以判定的阻塞后停止，不继续无边界浏览。Agy CLI
-  1.1.22 没有 `--max-turns`，这些 allowlist、工具预算和停止条件只是 prompt-level
-  约束；宿主通过 compact supervision 判断超限并停止或创建窄范围返修任务。
+- 若用户显式要求约束范围或成本，可在任务中明确读取/检查 allowlist（精确路径或有限模式）、
+  工具调用预算或停止条件；未显式提供时，默认不强加预算或 allowlist。Agy CLI 1.1.22
+  没有 `--max-turns`，用户显式提供的 allowlist、工具预算和停止条件属于 prompt-level 约束；
+  仅在显式配置预算时宿主才通过 compact supervision 判断超限并停止或创建窄范围返修任务。
+  未显式提供预算时，工具计数仅供观察，宿主不得自行发明上限或停止任务。
 - 返回形状固定为 schema 的 `task_id`、`outcome`、`summary`、`reason`、`missing`、
   `next_steps`、`evidence`；`blocked` 必须说明具体原因，禁止只返回裸 `BLOCKED`。
 

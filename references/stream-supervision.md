@@ -34,7 +34,7 @@ CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemin
 
 每次启动都显式传 `--effort high`。技能固定模型为 `gemini-3.7-flash-high`；Agy
 1.1.22 对该模型只接受省略 `--effort` 或匹配的 `high`，`low`/`medium` 会产生
-model selection conflict。默认 fast path 为 bridge-first，不强加微观工具或预算限制；若用户显式提供 allowlist、预算或停止条件，则作为 prompt-level constraints 注入。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
+model selection conflict。无论 fast path 还是手工 fallback，默认均不强加微观工具调用预算、读取 allowlist 或额外停止条件；只有用户显式提供时才注入作为 prompt-level constraints。未显式提供预算时，工具计数仅用于可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。不要传入 CLI 未探测到的值；当前 Agy 版本应先确认
 `--effort low|medium|high`。
 
 `--json-schema` 必须是 Agy 进程可读的绝对文件路径，推荐直接指向本技能的
@@ -98,7 +98,8 @@ AGY_EXIT=$(cat "$AGY_EXIT_FILE")
   ERROR/update 不重复输出，最多保留 8 个工具名。`count` 与 heartbeat/state.tools
   表示按 `conversation_id + step_index + tool_name`（或明确 tool-call id）去重后的
   unique invocation 数，而不是 stream event 数；没有稳定 identity 时按每次观察
-  保守计数，避免把不同调用错误合并。
+  保守计数，避免把不同调用错误合并。未显式提供 tool_budget 时，工具计数仅用于可观测性，
+  不构成 fail-closed 或停机条件。
 - `warning`：只报告稳定的类别码，不转发 warning 的正文。
 - `heartbeat`：默认 75 秒限频，显示阶段、经过时间和聚合计数；reducer 使用独立
   的本地 timer，即使 stdin 在等待 Agy 时静默也会发出 heartbeat。

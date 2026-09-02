@@ -53,7 +53,7 @@ python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-file
 ```
 
 默认 `required_tools` 为空，不生成或执行默认工具调用预算、读取 allowlist、每工具限制或多余停止条款。只有用户显式提供的 constraints（如 `required_tools`、`tool_budget`、`read_allowlist`、`stop_conditions`）才进入任务契约。
-若显式提供 `tool_budget`，可包含 `max_total_calls`、`max_calls_per_tool`、`max_updates`（传给 reducer）和 `stop_when_exhausted`；数值必须是有界正整数，布尔值只能用于 `stop_when_exhausted`。
+若显式提供 `tool_budget`，可包含 `max_total_calls`、`max_calls_per_tool`、`max_updates`（传给 reducer）和 `stop_when_exhausted`；数值必须是有界正整数，布尔值只能用于 `stop_when_exhausted`。未显式提供 `tool_budget` 时，工具计数仅用于可观测性，宿主和 helper 均不施加默认上限，不构成 fail-closed 或停机条件，不得因调用次数停止 Agy 或触发返修。
 
 Preset 映射：
 

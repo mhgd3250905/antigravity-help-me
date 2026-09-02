@@ -18,9 +18,9 @@
    确认的 `--expected-permission-mode`，不能只在自然语言中声称核对过。
 8. 每次 Agy 启动都显式传 `--effort high`。技能固定模型为
    `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
-   `high`，`low`/`medium` 会产生 model selection conflict。成本由读取/检查
-   allowlist、prompt-level 工具调用预算和停止条件控制；启动前从 `agy --help`
-   确认该 flag 和取值仍受当前版本支持。
+   `high`，`low`/`medium` 会产生 model selection conflict。若需要控制成本，由用户
+   显式提供的读取/检查 allowlist、prompt-level 工具调用预算或停止条件控制（未显式提供
+   时不注入默认限制）；启动前从 `agy --help` 确认该 flag 和取值仍受当前版本支持。
 
 ## 运行中
 
@@ -32,17 +32,19 @@
   75 秒限频、最多约 12 条、约 2 KiB。heartbeat 由独立 timer 产生，不依赖 stdin
   持续有事件。工具计数按 `conversation_id + step_index + tool_name`（或明确的
   tool-call id）去重，因此统计的是 unique invocation 而非 stream event；没有稳定
-  identity 的兼容 envelope 按每次观察保守计数，绝不按工具名合并不同调用。文本增量
+  identity 的兼容 envelope 按每次观察保守计数，绝不按工具名合并不同调用。未显式
+  提供 tool_budget 时，工具计数仅供观察，不构成 fail-closed 或停机条件。文本增量
   和完整 tool output 丢弃。
 - raw stdout 可保存为任务目录中的有界 `stream.ndjson`，compact 最新状态可保存
   为 `state.json`；两者在宿主上下文之外。stderr 单独落盘。
 - 管道必须独立保存 Agy producer 与 reducer 两个退出码；Agy 非零时，即使 reducer
   已收到合法 final 也不能验收。运行前删除任务目录中的旧退出码文件。
-- TASK.md 还应给出读取/检查 allowlist、每个工具的调用预算和停止条件。这些是
-  prompt-level 约束，不是 Agy CLI 的硬门禁：宿主仍须从 reducer 事件、raw/state 和
-  实际工作树独立验收，不能把模型遵守预算当作事实证明。
-- Agy CLI 1.1.22 没有 `--max-turns`；宿主应根据 compact supervision 判断调用/读取
-  是否超限，并停止当前 session 或创建窄范围返修任务。
+- 仅在用户显式提供时，TASK.md 才注入读取/检查 allowlist、每个工具的调用预算或额外停止条件；
+  默认不强加任何预算或 allowlist。这些是 prompt-level 约束，不是 Agy CLI 的硬门禁：当用户显式配置了
+  预算时，宿主仍须从 reducer 事件、raw/state 和实际工作树独立核对，不能把模型遵守预算当作事实证明。
+- Agy CLI 1.1.22 没有 `--max-turns`；仅在用户显式提供 tool_budget 时，宿主才根据 compact
+  supervision 判断是否超限并停止当前 session 或创建窄范围返修任务。未显式提供预算时，工具计数仅用于
+  可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。
 - timeout、心跳或暂时没有输出不等于失败。超过 Agy `--print-timeout` 加宿主宽限
   后才按超时处理；只停止本次技能启动且已确认身份的精确 session/PID。
 

@@ -2,7 +2,7 @@
 
 > **An Agent Skill that enables your host Agent to call your local Antigravity CLI (`agy`) to complete a concrete task.**
 
-Current version: **v1.3.0**
+Current version: **v1.3.1**
 
 ---
 
@@ -57,10 +57,12 @@ mapping, output semantics and manual fallback.
 For release work, the host first materializes version files such as `VERSION`, README,
 and `SECURITY.md`, then runs a read-only readiness gate, and only then creates tags or
 pushes. An implementation review must not treat those future host-owned actions as a
-current blocker. If the user explicitly provides constraints (such as a read allowlist or
-tool call budget), they enter the task contract as prompt-level constraints.
-Agy CLI 1.1.22 has no `--max-turns`; the host uses compact supervision to detect a
-budget overrun and stop or create a focused repair task.
+current blocker. If the user explicitly provides constraints (such as a read allowlist,
+tool call budget, or stop conditions), they enter the task contract as prompt-level constraints;
+Agy CLI 1.1.22 has no `--max-turns`, so when an explicit budget is configured, the host uses
+compact supervision to detect a budget overrun and stop or create a focused repair task.
+When no tool budget is provided, tool invocation counts are purely for observability, and the
+host must not invent limits or stop/repair tasks based on call counts.
 
 ## Requirements
 
@@ -111,9 +113,10 @@ CHANGE:          agy --add-dir <ABS_WORKSPACE> --mode accept-edits --model gemin
 
 每次启动都显式设置 `--effort high`。技能固定使用模型
 `gemini-3.7-flash-high`；Agy 1.1.22 对该模型只接受省略 `--effort` 或匹配的
-`high`，`low`/`medium` 会产生 model selection conflict。成本由读取/检查 allowlist、
-prompt-level 工具调用预算和停止条件控制，而不是用冲突的 effort 值降档。实际调用前
-必须从 `agy --help` 确认当前版本支持该 flag 与 `low|medium|high` 值。
+`high`，`low`/`medium` 会产生 model selection conflict。若需要控制成本，由用户显式
+提供的读取/检查 allowlist、prompt-level 工具调用预算或停止条件控制（未显式提供时不施加
+默认限制），而不是用冲突的 effort 值降档。实际调用前必须从 `agy --help` 确认当前版本
+支持该 flag 与 `low|medium|high` 值。
 
 Pipe stdout through `scripts/agy_stream_reducer.py` with `--task-id`, `--task-mode REVIEW|CHANGE`,
 `--execution-profile REVIEW_LOCAL|REVIEW_EXTERNAL|CHANGE`, `--workspace`, `--state`,
@@ -135,7 +138,8 @@ result is a protocol error. For CLI `ERROR`/`FAILED` statuses, a trusted `result
 explicit error response) is exposed as a cleaned, bounded `reason` in compact final and
 state; raw/tool output is never forwarded. Tool counts use stable invocation identity
 (`conversation_id + step_index + tool_name` or an explicit tool-call id), so they count
-unique invocations rather than stream events. The reusable schema is
+unique invocations rather than stream events; without an explicit tool budget, counts are
+strictly for observability and do not trigger fail-closed or termination. The reusable schema is
 [references/result-schema.json](references/result-schema.json).
 
 Declare exact dependencies such as `--required-tool search_web` before dispatch. The
