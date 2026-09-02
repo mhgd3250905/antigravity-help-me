@@ -16,6 +16,16 @@
 git clone https://github.com/mhgd3250905/antigravity-help-me.git ~/.codex/skills/antigravity-help-me
 ```
 
+## 示例
+
+技能名放在任务前或后都行：
+
+```
+$antigravity-help-me 审查登录流程的输入校验
+
+审查登录流程的输入校验 $antigravity-help-me
+```
+
 ## 前提
 
 `agy` 已安装并登录（`agy --version` 能跑通）。技能不负责安装和登录。
@@ -36,6 +46,14 @@ Manually:
 
 ```bash
 git clone https://github.com/mhgd3250905/antigravity-help-me.git ~/.codex/skills/antigravity-help-me
+```
+
+**Example** — skill name before or after the task, either works:
+
+```
+$antigravity-help-me review input validation in the login flow
+
+review input validation in the login flow $antigravity-help-me
 ```
 
 **Prerequisite** — `agy` is installed and signed in (`agy --version` works). The skill does not install or sign in for you.
