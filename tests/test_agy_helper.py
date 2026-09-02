@@ -12,11 +12,13 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 
@@ -104,9 +106,97 @@ raise SystemExit(int(os.environ.get("FAKE_AGY_EXIT", "0")))
 '''
 
 
+BATCH_FAKE_AGY = r'''
+import json
+import os
+import pathlib
+import re
+import sys
+import time
+
+args = sys.argv[1:]
+if "--version" in args:
+    print("agy 1.1.22")
+    raise SystemExit(0)
+if "--help" in args:
+    print("""Usage: agy
+  --add-dir
+  --mode (accept-edits, plan)
+  -p, --print
+  --model
+  --effort (low|medium|high)
+  --output-format (text, json, stream-json)
+  --json-schema
+  --print-timeout
+  --conversation
+  --dangerously-skip-permissions
+""")
+    raise SystemExit(0)
+if args[:3] == ["--output-format", "json", "models"]:
+    print(json.dumps({"command": {"data": {"models": [{"id": "gemini-3.7-flash-high"}]}}}))
+    raise SystemExit(0)
+
+workspace = pathlib.Path(args[args.index("--add-dir") + 1])
+prompt = args[args.index("-p") + 1]
+task_path = pathlib.Path(prompt.split('"')[1])
+task_id = task_path.parent.name
+task_text = task_path.read_text(encoding="utf-8")
+goal = next((line.split("：", 1)[1] for line in task_text.splitlines() if line.startswith("- 目标：")), "")
+control = os.environ.get("FAKE_BATCH_CONTROL")
+control_path = pathlib.Path(control) if control else None
+
+def record(kind):
+    if not control_path:
+        return
+    control_path.mkdir(parents=True, exist_ok=True)
+    (control_path / (kind + "-" + task_id + ".json")).write_text(
+        json.dumps({"kind": kind, "task_id": task_id, "goal": goal, "time": time.monotonic()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+record("start")
+print(json.dumps({
+    "type": "init",
+    "cwd": str(workspace),
+    "model": "gemini-3.7-flash-high",
+    "permission_mode": "request-review",
+    "conversation_id": "batch-fake-" + task_id,
+    "tools": [],
+    "expanded_commands": [{"name": "plan"}] if "执行配置：REVIEW_LOCAL" in task_text else [],
+}), flush=True)
+
+sleep_match = re.search(r"sleep=([0-9.]+)", goal)
+duration = float(sleep_match.group(1)) if sleep_match else float(os.environ.get("FAKE_BATCH_SLEEP", "0.25"))
+if "timeout" not in goal:
+    time.sleep(duration)
+    outcome = "blocked" if "blocked" in goal else "completed"
+    result = {
+        "task_id": task_id,
+        "outcome": outcome,
+        "summary": "fake batch " + outcome,
+        "reason": "blocked by fixture" if outcome == "blocked" else "",
+        "missing": ["fixture input"] if outcome == "blocked" else [],
+        "next_steps": ["provide fixture input"] if outcome == "blocked" else [],
+        "evidence": ["batch fake evidence"],
+    }
+    if "verify" in task_text and outcome == "completed":
+        result["verdict"] = "pass"
+    record("end")
+    print(json.dumps({"type": "result", "status": "SUCCESS", "structured_output": result}, ensure_ascii=False), flush=True)
+    raise SystemExit(7 if "fail" in goal else 0)
+time.sleep(10)
+'''
+
+
 def _make_fake_agy(folder: Path) -> Path:
     script = folder / "fake_agy.py"
     script.write_text(textwrap.dedent(FAKE_AGY), encoding="utf-8")
+    return script
+
+
+def _make_batch_fake_agy(folder: Path) -> Path:
+    script = folder / "batch_fake_agy.py"
+    script.write_text(textwrap.dedent(BATCH_FAKE_AGY), encoding="utf-8")
     return script
 
 
@@ -119,7 +209,348 @@ def _base_request(workspace: Path) -> dict:
     }
 
 
+def _batch_job(workspace: Path, goal: str, preset: str = "review-local") -> dict:
+    request = {
+        "workspace": str(workspace),
+        "goal": goal,
+        "scope": ["src/**"],
+        "acceptance": ["fake task reaches a terminal result"],
+    }
+    if preset in {"change", "repair"}:
+        request.update({"allowed_changes": ["src/**"], "authorization": "fixture authorization"})
+    if preset == "repair":
+        request.update({"parent_task_id": "old-task", "failure": "fixture failure"})
+    if preset == "verify":
+        request["subject"] = "fixture subject"
+    return {"preset": preset, "request": request}
+
+
+def _read_batch_events(control: Path) -> list[dict]:
+    if not control.exists():
+        return []
+    return [json.loads(path.read_text(encoding="utf-8")) for path in control.glob("*.json")]
+
+
 class HelperContractTests(unittest.TestCase):
+    def _invoke_batch(
+        self,
+        agy: Path,
+        request: dict,
+        *,
+        control: Optional[Path] = None,
+        run_timeout: str = "2",
+        extra_env: Optional[dict] = None,
+    ) -> subprocess.CompletedProcess:
+        environment = os.environ.copy()
+        if control is not None:
+            environment["FAKE_BATCH_CONTROL"] = str(control)
+        if extra_env:
+            environment.update(extra_env)
+        return subprocess.run(
+            [
+                sys.executable,
+                str(HELPER),
+                "batch",
+                "--request-stdin",
+                "--agy",
+                str(agy),
+                "--run-timeout",
+                run_timeout,
+            ],
+            input=json.dumps(request, ensure_ascii=False) + "\n",
+            cwd=ROOT,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    def test_batch_max_parallel_is_bounded_and_fourth_runnable_job_queues(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-cap-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {
+                "batch_id": "batch-cap-test",
+                "jobs": [_batch_job(workspace, f"job-{index} sleep=0.25") for index in range(4)],
+            }
+            process = self._invoke_batch(agy, request, control=control)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            lines = [line for line in process.stdout.splitlines() if line.strip()]
+            events = [json.loads(line) for line in lines]
+            self.assertEqual(len(lines), len(events), "every output line must be one JSON object")
+            summary = events[-1]
+            self.assertEqual(summary["event"], "batch")
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["batch_id"], "batch-cap-test")
+            self.assertEqual(summary["job_count"], 4)
+            lane_events = [event for event in events if event.get("event") != "batch"]
+            self.assertTrue(lane_events)
+            self.assertTrue(all(event["batch_id"] == "batch-cap-test" for event in lane_events))
+            self.assertEqual(
+                {event["job_id"] for event in events if event.get("event") == "run"},
+                {f"job-{index + 1:03d}" for index in range(4)},
+            )
+            for job in summary["jobs"]:
+                self.assertIsInstance(job["producer_pid"], int)
+                self.assertIsInstance(job["reducer_pid"], int)
+                self.assertTrue(job["deadline_at"])
+                launch = json.loads((Path(job["task_dir"]) / "launch.json").read_text(encoding="utf-8"))
+                self.assertEqual(launch["batch_id"], "batch-cap-test")
+                self.assertEqual(launch["job_id"], job["job_id"])
+
+            fixture_events = _read_batch_events(control)
+            starts = [event for event in fixture_events if event["kind"] == "start"]
+            ends = [event for event in fixture_events if event["kind"] == "end"]
+            self.assertEqual(len(starts), 4)
+            self.assertEqual(len(ends), 4)
+            first_end = min(event["time"] for event in ends)
+            self.assertGreaterEqual(sum(event["time"] < first_end for event in starts), 3)
+            self.assertGreaterEqual(
+                max(event["time"] for event in starts),
+                first_end,
+                "the fourth runnable job must wait for an active lane",
+            )
+
+            active = 0
+            maximum = 0
+            for event in sorted(fixture_events, key=lambda item: item["time"]):
+                active += 1 if event["kind"] == "start" else -1
+                maximum = max(maximum, active)
+            self.assertLessEqual(maximum, 3)
+
+    def test_batch_max_parallel_accepts_only_one_through_three(self) -> None:
+        from scripts import agy_helper
+
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-validation-") as raw:
+            workspace = Path(raw) / "workspace"
+            workspace.mkdir()
+            base = {"jobs": [_batch_job(workspace, "one")]}
+            self.assertEqual(agy_helper._validate_batch_request(base)["max_parallel"], 3)
+            for value in (0, 4, True, 1.5, "2"):
+                with self.subTest(max_parallel=value):
+                    with self.assertRaises(agy_helper.HelperError) as context:
+                        agy_helper._validate_batch_request({**base, "max_parallel": value})
+                    self.assertEqual(context.exception.code, agy_helper.EXIT_REQUEST_INVALID)
+
+    def test_batch_request_file_accepts_bounded_utf8_json(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-file-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            agy = _make_batch_fake_agy(fake_dir)
+            request_file = root / "batch.json"
+            request_file.write_text(
+                json.dumps(
+                    {"batch_id": "batch-file-test", "jobs": [_batch_job(workspace, "文件任务 sleep=0.05")]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "batch",
+                    "--request-file",
+                    str(request_file),
+                    "--agy",
+                    str(agy),
+                    "--run-timeout",
+                    "2",
+                ],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            self.assertEqual(events[-1]["batch_id"], "batch-file-test")
+            task_path = Path(events[-1]["jobs"][0]["task_path"])
+            self.assertIn("文件任务", task_path.read_text(encoding="utf-8"))
+
+    def test_batch_reads_share_overlapping_workspace(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-read-share-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {"jobs": [_batch_job(workspace, f"read-{index} sleep=0.3") for index in range(3)]}
+            process = self._invoke_batch(agy, request, control=control)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            fixture_events = _read_batch_events(control)
+            starts = [event for event in fixture_events if event["kind"] == "start"]
+            ends = [event for event in fixture_events if event["kind"] == "end"]
+            self.assertEqual(len(starts), 3)
+            self.assertLess(max(event["time"] for event in starts), min(event["time"] for event in ends))
+
+    def test_batch_write_is_exclusive_and_does_not_starve_behind_reads(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-locks-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            child_workspace = workspace / "child"
+            child_workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            jobs = [_batch_job(child_workspace, f"read-{index} sleep=0.25") for index in range(6)]
+            jobs.append(_batch_job(workspace, "write sleep=0.15", "change"))
+            process = self._invoke_batch(agy, {"jobs": jobs}, control=control)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            fixture_events = _read_batch_events(control)
+            intervals = {}
+            for event in fixture_events:
+                intervals.setdefault(event["goal"].split(" ", 1)[0], {})[event["kind"]] = event["time"]
+            write_interval = intervals["write"]
+            read_intervals = [value for key, value in intervals.items() if key.startswith("read-")]
+            self.assertTrue(read_intervals)
+            for interval in read_intervals:
+                self.assertTrue(
+                    write_interval["end"] <= interval["start"] or interval["end"] <= write_interval["start"],
+                    "overlapping read/write workspaces must not run concurrently",
+                )
+            self.assertLess(
+                write_interval["start"],
+                max(interval["end"] for interval in read_intervals),
+                "a queued write must be admitted before all overlapping reads finish",
+            )
+
+    def test_batch_non_overlapping_writes_can_run_concurrently(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-write-share-") as raw:
+            root = Path(raw)
+            left = root / "left"
+            right = root / "right"
+            left.mkdir()
+            right.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {
+                "jobs": [
+                    _batch_job(left, "left-write sleep=0.35", "change"),
+                    _batch_job(right, "right-write sleep=0.35", "change"),
+                ]
+            }
+            process = self._invoke_batch(agy, request, control=control)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            fixture_events = _read_batch_events(control)
+            starts = sorted(event["time"] for event in fixture_events if event["kind"] == "start")
+            ends = sorted(event["time"] for event in fixture_events if event["kind"] == "end")
+            self.assertEqual(len(starts), 2)
+            self.assertLess(max(starts), min(ends))
+
+    def test_batch_skips_a_locked_workspace_for_other_runnable_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-scan-") as raw:
+            root = Path(raw)
+            left = root / "left"
+            right = root / "right"
+            left.mkdir()
+            right.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {
+                "max_parallel": 3,
+                "jobs": [
+                    _batch_job(left, "left-first sleep=0.35", "change"),
+                    _batch_job(left, "left-second sleep=0.35", "change"),
+                    _batch_job(right, "right-write sleep=0.15", "change"),
+                ],
+            }
+            process = self._invoke_batch(agy, request, control=control)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            fixture_events = _read_batch_events(control)
+            intervals = {}
+            for event in fixture_events:
+                intervals.setdefault(event["goal"].split(" ", 1)[0], {})[event["kind"]] = event["time"]
+            self.assertLess(intervals["right-write"]["start"], intervals["left-first"]["end"])
+            self.assertLessEqual(intervals["left-first"]["end"], intervals["left-second"]["start"])
+
+    def test_batch_lane_failure_and_timeout_do_not_stop_other_lanes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-isolation-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {
+                "max_parallel": 3,
+                "jobs": [
+                    _batch_job(workspace, "ok sleep=0.3"),
+                    _batch_job(workspace, "fail sleep=0.1"),
+                    _batch_job(workspace, "timeout"),
+                    _batch_job(workspace, "blocked sleep=0.1"),
+                ],
+            }
+            process = self._invoke_batch(agy, request, control=control, run_timeout="1")
+            self.assertNotEqual(process.returncode, 0)
+            events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            summary = events[-1]
+            self.assertEqual(summary["status"], "failed")
+            statuses = {job["job_id"]: job["status"] for job in summary["jobs"]}
+            self.assertEqual(statuses["job-001"], "completed")
+            self.assertEqual(statuses["job-002"], "producer_failed")
+            self.assertEqual(statuses["job-003"], "timeout")
+            self.assertIn(statuses["job-004"], {"completed", "blocked"})
+            self.assertEqual(summary["jobs_completed"] + summary["jobs_blocked"], 2)
+
+    def test_batch_cancellation_terminates_active_lanes_and_marks_pending_jobs(self) -> None:
+        from scripts import agy_helper
+
+        with tempfile.TemporaryDirectory(prefix="agy-helper-batch-cancel-") as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            fake_dir = root / "fake"
+            fake_dir.mkdir()
+            control = root / "control"
+            agy = _make_batch_fake_agy(fake_dir)
+            request = {"jobs": [_batch_job(workspace, f"cancel-{index} timeout") for index in range(5)]}
+            cancel_event = threading.Event()
+            timer = threading.Timer(0.25, cancel_event.set)
+            output = StringIO()
+            timer.start()
+            try:
+                with mock.patch.dict(os.environ, {"FAKE_BATCH_CONTROL": str(control)}, clear=False):
+                    with redirect_stdout(output):
+                        code, summary = agy_helper._dispatch_batch(
+                            request,
+                            agy=str(agy),
+                            skip_preflight=True,
+                            run_timeout=30,
+                            cancel_event=cancel_event,
+                        )
+            finally:
+                timer.cancel()
+            self.assertNotEqual(code, 0)
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(summary["jobs_cancelled"], 5)
+            self.assertTrue(all(job["status"] == "cancelled" for job in summary["jobs"]))
+            for job in summary["jobs"]:
+                if job.get("task_dir"):
+                    task_dir = Path(job["task_dir"])
+                    self.assertTrue((task_dir / "producer-exit.txt").exists())
+                    self.assertTrue((task_dir / "reducer-exit.txt").exists())
     def test_public_run_parser_has_no_override_or_preflight_bypass_flags(self) -> None:
         from scripts import agy_helper
 
@@ -217,6 +648,28 @@ class HelperContractTests(unittest.TestCase):
             failed_result = json.loads(failure.stdout)
             self.assertNotEqual(failure.returncode, 0)
             self.assertIn("model_unavailable", failed_result["problems"])
+
+    def test_cli_stdout_is_utf8_with_non_utf8_default_encoding(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-stdout-") as raw:
+            folder = Path(raw) / "中文"
+            folder.mkdir()
+            agy = _make_fake_agy(folder)
+            environment = os.environ.copy()
+            environment.pop("PYTHONUTF8", None)
+            environment["PYTHONIOENCODING"] = "gbk"
+            process = subprocess.run(
+                [sys.executable, str(HELPER), "doctor", "--json", "--agy", str(agy)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr.decode("utf-8", errors="replace"))
+            output = process.stdout.decode("utf-8")
+            result = json.loads(output)
+            self.assertEqual(result["status"], "ready")
+            self.assertIn("中文", result["agy"]["path"])
 
     def test_stdin_and_file_requests_create_contracts_without_user_text_in_argv(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agy-helper-run-") as raw:

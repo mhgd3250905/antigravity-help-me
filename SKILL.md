@@ -41,6 +41,29 @@ helper 会安全生成 task id、内部 TASK.md、固定 Agy/reducer argv、stat
 completed 时要求 `verdict: pass|fail`；blocked 保留 blocked 语义。五类映射、请求字段、framing、退出语义和保留的内部
 文件见 [references/fast-path.md](references/fast-path.md)。
 
+当多个任务彼此独立且工作区策略允许时，可在一次 helper 调用中使用 `batch`：
+
+```text
+python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin
+```
+
+输入仍是一个有界 UTF-8 JSON 对象，形状为
+`{"max_parallel": 3, "jobs": [{"job_id": "...", "preset": "review-local", "request": {...}}]}`；
+每个 `request` 使用与 `run` 相同的原有请求字段，`job_id` 和顶层 `batch_id` 可选，省略
+时由 helper 生成稳定于本次输出的标识。`max_parallel` 只能是 `1..3`，默认 `3`；
+`--run-timeout` 是每个 lane 的独立 deadline。每个 lane 有自己的 Agy producer、Reducer、
+task id、任务目录、日志、PID 和终态，事件带 `batch_id`/`job_id`，最后输出一个
+`event=batch` 汇总。`completed`/`blocked` lane 不会终止其他 lane；失败、超时或取消会在
+汇总中单独分类，取消只终止本批已经启动的精确子进程，并把排队项标为 `cancelled`。
+
+batch 的上限只属于这一次 helper 进程内的 admission，不是跨进程或整机的全局硬限制；
+独立终端或其他 helper 调用不参加同一 admission。只读任务可以共享同一或祖先/子孙重叠
+workspace（最多 3 路），`change`/`repair` 写任务与重叠读写互斥，互不重叠 workspace
+可以并发写。只有真正独立的任务才可并发，不能为了占满 lane 人为拆分一个任务。
+
+`batch` 的完整请求、调度、输出和取消语义见
+[references/fast-path.md](references/fast-path.md)。
+
 命令优先入口不可用时，才使用下文的手工 TASK/argv/reducer 流程；它们是完整的
 fallback/reference，不是每次新会话的首要学习路径。
 
@@ -61,8 +84,9 @@ workspace 变化并作最终决定。手工 fallback 时主会话自行写 TASK.
 执行已确定的摸排/修改/测试并返回要求的证据；缺少前提时返回有原因的结构化
 `blocked`。
 
-同一时间最多运行一个由本次技能调用启动的 Agy 进程。不要把开放式产品、创意、
-架构或优先级判断原样交给 Agy；任务收敛规则见
+`run` 保持单 lane 语义；`batch` 只在本次调用内最多运行 3 个 Agy producer，且
+每个 lane 仍保持一 Agy 对一 Reducer。不要把开放式产品、创意、架构或优先级判断原样
+交给 Agy；任务收敛规则见
 [references/task-shaping.md](references/task-shaping.md)。
 
 ## 手工 fallback：首次运行前探测

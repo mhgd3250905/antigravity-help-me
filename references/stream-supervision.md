@@ -1,10 +1,12 @@
 # Stream-json 监督与结果分流
 
-本参考只在需要查看 Agy 运行阶段时读取。它定义的是一个薄 transport
-reducer，不是后台任务调度器：Agy 仍是一次前台进程，宿主仍负责等待、授权和
+本参考只在需要查看 Agy 运行阶段时读取。它定义的是一个每 lane 的薄 transport
+reducer；`batch` 的外层 admission/取消调度由 `scripts/agy_helper.py` 负责，不由
+reducer 复用或合并 lane。单 lane 的 Agy 仍是前台子进程，宿主仍负责等待、授权和
 最终验收。
 
-命令优先调用应使用 `scripts/agy_helper.py` 的 `doctor` → `run` fast path；helper
+命令优先调用应使用 `scripts/agy_helper.py` 的 `doctor` → `run` fast path；多个独立
+任务使用 helper 的 `batch` fast path；helper
 会逐行转发 reducer 的 compact JSON 事件，并在连续 75 秒无可见输出且 producer 仍在运行时发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算），保存 raw stream，并对本次精确的
 producer/reducer 子进程施加有界 timeout。本文下面的直接管道和 TASK/argv 示例是
 helper 不可用时的手工 fallback。不要把 raw stream 直接接入宿主上下文。

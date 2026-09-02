@@ -70,7 +70,82 @@ Preset 映射：
 连字符，长度不超过 48；目标已经存在时拒绝覆盖。TASK.md 仍是不可变追溯产物，
 包含 profile/mode、绝对路径、用户显式约束、授权和禁止项。返修创建新 task，不原地改写前序任务。
 
-## 3. 输出与退出语义
+## 3. 用 batch 提交独立任务
+
+需要一次提交多个独立任务时使用：
+
+```text
+python <ABS_REPO>\scripts\agy_helper.py batch --request-stdin
+python <ABS_REPO>\scripts\agy_helper.py batch --request-file <ABS_BATCH_JSON>
+```
+
+batch 输入是一个有界 UTF-8 JSON 对象。每项必须明确 `preset` 和原有 `request`；
+`request` 的字段校验与 `run` 完全相同：
+
+```json
+{
+  "batch_id": "batch-api-review",
+  "max_parallel": 3,
+  "jobs": [
+    {
+      "job_id": "auth-review",
+      "preset": "review-local",
+      "request": {
+        "workspace": "E:\\project",
+        "goal": "审查认证流程",
+        "scope": ["src/auth/**"],
+        "acceptance": ["每项结论包含文件和证据"]
+      }
+    },
+    {
+      "job_id": "api-review",
+      "preset": "review-local",
+      "request": {
+        "workspace": "E:\\project-api",
+        "goal": "审查 API 边界",
+        "scope": ["src/api/**"],
+        "acceptance": ["列出可复核发现"]
+      }
+    }
+  ]
+}
+```
+
+顶层 `batch_id`、每项 `job_id` 均可省略；省略时 helper 生成批次 ID，并按输入顺序生成
+`job-001`、`job-002` 等 ID。ID 只使用小写字母、数字和连字符，长度不超过 48。
+`max_parallel` 只能为整数 `1..3`，默认 `3`；命令行 `--run-timeout` 作为每个 lane
+的独立 deadline，而不是整个 batch 的共享 deadline。helper 会先完整校验所有 job，
+再只做一次 `doctor`，随后每个 job 使用独立 Agy、Reducer、task id、task 目录和日志。
+
+工作区 admission 按规范化绝对路径判断相同、祖先或子孙关系：
+
+| 任务组合 | 重叠 workspace | 不重叠 workspace |
+| --- | --- | --- |
+| `review-local`/`review-external`/`verify` + 只读任务 | 可共享 | 可并发 |
+| 任一 `change`/`repair` + 读或写任务 | 互斥 | 可并发 |
+
+调度器会扫描待运行队列，让不相关 workspace 继续运行；当重叠写任务等待时，新的同
+workspace 读任务不会无限插队，因此写任务不会因读任务饥饿。一次调用内活跃 Agy
+producer 永远不超过 `max_parallel`，第 4 个可运行 job 排队。这个上限只属于当前
+helper 进程，不是跨进程或整机全局限制；独立终端/helper 调用不参加同一 admission。
+只有真正独立的任务才可放入同一 batch；不要为填充 lane 拆分一个任务。resume 同一
+conversation 仍必须串行，独立验收/返修仍使用新 conversation。
+
+每个 lane 的 compact `init`、`phase`、`heartbeat`、`final`、`run` 事件都带 `batch_id` 和
+`job_id`，输出由 helper 按 JSONL 行原子写出；最后一行是 `event=batch` 汇总，包含
+按输入顺序排列的 `jobs` 以及 `jobs_completed`、`jobs_blocked`、`jobs_failed`、
+`jobs_cancelled` 计数，并重复实际的 batch `exit_code`。批次状态和退出码如下：
+
+- `completed`：全部 lane 为 `completed`，退出码 `0`；
+- `blocked`：lane 只有 `completed`/`blocked`，至少一个是 `blocked`，退出码 `0`；
+- `failed`：任一 lane 为 producer/reducer failure、timeout、协议错误或派发失败，退出码非零；
+- `cancelled`：宿主取消后活动 lane 被精确终止、排队 lane 标记为 `cancelled`，退出码非零；
+- `preflight_failed`：doctor 未通过，没有启动 lane，退出码沿用 doctor 分类码。
+
+单 lane 失败、blocked 或 timeout 只影响该 lane；其他活动和排队 lane 继续按 admission
+运行。取消时 helper 只终止本批已启动的精确 producer/reducer PID，不按进程名清理。
+
+## 4. 输出与退出语义
 
 `run` 的 stdout 逐行转发 reducer 的 compact JSON 事件，并在连续 75 秒没有可见 compact 输出且 producer 仍运行时发出 helper 自身的低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算，终态后停止，数量有界且不包含 raw/tool output）；调度结束时输出一个 `event=run` 汇总。Agy raw stream、tool output 和长 response 只保存在任务目录：
 

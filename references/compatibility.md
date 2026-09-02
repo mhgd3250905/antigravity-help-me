@@ -5,10 +5,12 @@
 ## Fast path
 
 优先运行 `python <ABS_REPO>\scripts\agy_helper.py doctor --json`，再用
-`run --preset ... --request-stdin` 或 `--request-file`。helper 使用标准库，作为 bridge-first 入口负责
+`run --preset ... --request-stdin`/`--request-file`；多个独立任务可用
+`batch --request-stdin`/`--request-file`。helper 使用标准库，作为 bridge-first 入口负责
 版本/model/help/reducer 预检（版本 1.1.22 标记 tested，其他版本若能力齐全则 compatible_unverified 可继续）、绝对 workspace 任务书和精确 producer/reducer
 argv。长请求只通过有界 UTF-8 stdin/file 进入 helper，不放进 argv 或环境变量。当 `--request-stdin` 连接交互式 TTY 时，helper 在读取前临时关闭输入 echo 并在成功、解析失败与异常路径可靠恢复（兼容 Windows Console/ConPTY 与 POSIX）；无法切换时不破坏输入并建议使用 `--request-file`。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。默认无微观工具/预算限制。
-命令优先接口、五个 preset、timeout 和退出语义见
+`batch` 的 `max_parallel` 只能为 `1..3`，每个 lane 独立运行；这个上限不跨 helper
+进程或终端共享。命令优先接口、五个 preset、timeout 和退出语义见
 [fast-path.md](fast-path.md)；本页其余内容描述 helper 不可用时的手工 fallback。
 
 ## 宿主最低契约
@@ -20,6 +22,8 @@ argv。长请求只通过有界 UTF-8 stdin/file 进入 helper，不放进 argv 
 - 捕获 stdout、stderr，并分别保存 Agy producer 与 reducer 的退出码；
 - 等待超过普通单次工具时限的进程，或轮询同一个持久 session；
 - 读写当前工作区 TASK.md，并检查任务产生的文件变化。
+- 使用 `batch` 时，还必须能同时监督最多三个独立 producer/reducer 管道，并按
+  `batch_id`/`job_id` 关联各 lane 的 compact 事件和终态；取消时只终止本批精确 PID。
 - 若启用实时监督，还要能把 Agy 的 stdout NDJSON 通过 stdin 交给本地 reducer，
   同时把 raw stdout/stderr 落盘到任务目录而不是展示给模型。
 

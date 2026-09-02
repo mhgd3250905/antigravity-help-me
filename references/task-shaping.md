@@ -12,6 +12,18 @@ Gemini Flash High 擅长快速完成确定任务，不代替主会话作开放�
 
 缺失项会改变结果时由主会话先判断；无法安全推断时再问用户。
 
+## batch 的独立性与工作区策略
+
+只有彼此独立的任务才放入同一 `batch`；同一 conversation 的 resume 必须串行，不能
+为了占满三条 lane 人为拆分一个任务。`review-local`、`review-external` 和 `verify`
+属于只读任务，同一或祖先/子孙重叠 workspace 可以共享；`change` 和 `repair` 属于
+写任务，与重叠读/写互斥，互不重叠 workspace 才可并发写。helper 的 `batch` admission
+只约束当前一次调用，独立终端/helper 调用不共享这个上限。
+
+调度时不因一个被锁 workspace 阻塞其他可运行 workspace；如果重叠写任务在等待，新的
+同 workspace 读任务不能无限插队。单个 lane 的失败、blocked 或 timeout 只影响自身；
+宿主取消时才统一终止本批活动 lane，并收束排队状态。
+
 ## 必须拆开的任务
 
 “研究所有方案、选一个、实现、测试并决定是否上线”不是一件任务。拆成：

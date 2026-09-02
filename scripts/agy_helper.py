@@ -25,7 +25,7 @@ import queue
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +44,8 @@ MAX_PROBE_OUTPUT_BYTES = 256 * 1024
 MAX_OUTPUT_BYTES = 2048
 MAX_RAW_LOG_BYTES = 64 * 1024
 MAX_STDERR_BYTES = 64 * 1024
+MAX_BATCH_PARALLEL = 3
+DEFAULT_BATCH_MAX_PARALLEL = 3
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 VERSION_PATTERN = re.compile(r"(?<!\d)(\d+\.\d+\.\d+)(?!\d)")
 
@@ -161,6 +163,21 @@ def _normalise_path(value: Any) -> Optional[str]:
 
 def _json_line(value: Mapping[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _configure_stdout_utf8() -> None:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(encoding="utf-8")
+    except (OSError, ValueError):
+        return
+
+
+def _utc_timestamp(offset_seconds: float = 0.0) -> str:
+    value = _datetime.datetime.now(_datetime.timezone.utc) + _datetime.timedelta(seconds=offset_seconds)
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -611,9 +628,66 @@ def _validate_request(request: Mapping[str, Any], preset_name: str) -> Dict[str,
     return normalized
 
 
+def _validate_batch_identifier(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not TASK_ID_PATTERN.fullmatch(value.strip()):
+        raise HelperError(
+            EXIT_REQUEST_INVALID,
+            f"batch field '{field}' must use lowercase letters, digits, or hyphens and be at most 48 characters",
+        )
+    return value.strip()
+
+
+def _validate_batch_request(request: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(request, Mapping):
+        raise HelperError(EXIT_REQUEST_INVALID, "batch request must be an object")
+    jobs_value = request.get("jobs")
+    if not isinstance(jobs_value, list) or not jobs_value:
+        raise HelperError(EXIT_REQUEST_INVALID, "batch request field 'jobs' must be a non-empty list")
+    max_parallel = request.get("max_parallel", DEFAULT_BATCH_MAX_PARALLEL)
+    if isinstance(max_parallel, bool) or not isinstance(max_parallel, int):
+        raise HelperError(EXIT_REQUEST_INVALID, "batch field 'max_parallel' must be an integer between 1 and 3")
+    if not 1 <= max_parallel <= MAX_BATCH_PARALLEL:
+        raise HelperError(EXIT_REQUEST_INVALID, "batch field 'max_parallel' must be an integer between 1 and 3")
+
+    batch_id = request.get("batch_id")
+    normalized_batch_id = _validate_batch_identifier(batch_id, "batch_id") if batch_id is not None else None
+    normalized_jobs: List[Dict[str, Any]] = []
+    seen_job_ids = set()
+    for index, item in enumerate(jobs_value):
+        if not isinstance(item, Mapping):
+            raise HelperError(EXIT_REQUEST_INVALID, f"batch job {index + 1} must be an object")
+        preset = item.get("preset")
+        if not isinstance(preset, str) or preset not in PRESETS:
+            raise HelperError(EXIT_REQUEST_INVALID, f"batch job {index + 1} requires a valid preset")
+        if "request" not in item or not isinstance(item["request"], Mapping):
+            raise HelperError(EXIT_REQUEST_INVALID, f"batch job {index + 1} requires an object request")
+        job_id_value = item.get("job_id", f"job-{index + 1:03d}")
+        job_id = _validate_batch_identifier(job_id_value, f"jobs[{index}].job_id")
+        if job_id in seen_job_ids:
+            raise HelperError(EXIT_REQUEST_INVALID, f"batch job id '{job_id}' is duplicated")
+        seen_job_ids.add(job_id)
+        normalized_jobs.append(
+            {
+                "job_id": job_id,
+                "preset": preset,
+                "request": _validate_request(item["request"], preset),
+            }
+        )
+    return {
+        "batch_id": normalized_batch_id,
+        "max_parallel": max_parallel,
+        "jobs": normalized_jobs,
+    }
+
+
 def _generate_task_id() -> str:
     timestamp = _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
     return f"task-{timestamp}-{secrets.token_hex(3)}"
+
+
+def _generate_batch_id() -> str:
+    timestamp = _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return f"batch-{timestamp}-{secrets.token_hex(3)}"
 
 
 def _markdown_items(items: Iterable[str]) -> str:
@@ -904,6 +978,37 @@ def _read_task_state(task_dir: Path) -> Dict[str, Any]:
         return {}
 
 
+def _emit_dispatch_event(
+    event: Mapping[str, Any],
+    event_sink: Optional[Callable[[Mapping[str, Any]], None]],
+) -> None:
+    if event_sink is not None:
+        event_sink(event)
+    else:
+        print(_json_line(event), flush=True)
+
+
+def _wait_process(
+    process: Optional[subprocess.Popen[bytes]],
+    timeout: float,
+    cancel_event: Optional[threading.Event],
+) -> Tuple[Optional[int], bool]:
+    """Wait in short slices so batch cancellation can stop exact children."""
+    if process is None:
+        return None, False
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return None, True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return process.poll(), False
+        try:
+            return process.wait(timeout=min(0.1, remaining)), False
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def _dispatch(
     request: Mapping[str, Any],
     preset_name: str,
@@ -913,6 +1018,10 @@ def _dispatch(
     reducer: Path = DEFAULT_REDUCER,
     skip_preflight: bool = False,
     run_timeout: float = DEFAULT_RUN_TIMEOUT_SECONDS,
+    cancel_event: Optional[threading.Event] = None,
+    event_sink: Optional[Callable[[Mapping[str, Any]], None]] = None,
+    batch_id: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     if not skip_preflight:
         doctor_code, doctor_result = _doctor(agy)
@@ -941,20 +1050,26 @@ def _dispatch(
         normalized["required_tools"],
         normalized.get("tool_budget"),
     )
-    _write_json(
-        task_dir / "launch.json",
-        {
-            "task_id": task_id,
-            "preset": preset_name,
-            "workspace": normalized["workspace"],
-            "profile": profile["profile"],
-            "task_mode": profile["task_mode"],
-            "run_timeout_seconds": run_timeout,
-            "producer_grace_seconds": POST_FINAL_PRODUCER_GRACE_SECONDS,
-            "agy_argv": [*agy_argv[:-1], "<FIXED_PROMPT>"],
-            "reducer_argv": reducer_argv,
-        },
-    )
+    started_at = _utc_timestamp()
+    deadline_at = _utc_timestamp(run_timeout)
+    launch_record: Dict[str, Any] = {
+        "task_id": task_id,
+        "preset": preset_name,
+        "workspace": normalized["workspace"],
+        "profile": profile["profile"],
+        "task_mode": profile["task_mode"],
+        "run_timeout_seconds": run_timeout,
+        "producer_grace_seconds": POST_FINAL_PRODUCER_GRACE_SECONDS,
+        "agy_argv": [*agy_argv[:-1], "<FIXED_PROMPT>"],
+        "reducer_argv": reducer_argv,
+    }
+    if batch_id is not None:
+        launch_record["started_at"] = started_at
+        launch_record["deadline_at"] = deadline_at
+        launch_record["batch_id"] = batch_id
+    if job_id is not None:
+        launch_record["job_id"] = job_id
+    _write_json(task_dir / "launch.json", launch_record)
     producer_exit: Optional[int] = None
     reducer_exit: Optional[int] = None
     reducer_events: List[Dict[str, Any]] = []
@@ -964,6 +1079,9 @@ def _dispatch(
     spawn_error: Optional[str] = None
     timed_out = False
     producer_grace_exceeded = False
+    cancelled = False
+    producer_pid: Optional[int] = None
+    reducer_pid: Optional[int] = None
     reducer_stdout_thread: Optional[threading.Thread] = None
     reducer_stderr_thread: Optional[threading.Thread] = None
     try:
@@ -974,6 +1092,13 @@ def _dispatch(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        producer_pid = producer.pid
+        if batch_id is not None:
+            launch_record["producer_pid"] = producer_pid
+            try:
+                _write_json(task_dir / "launch.json", launch_record)
+            except OSError:
+                pass
         assert producer.stdout is not None
         assert producer.stderr is not None
         producer_stderr_thread = threading.Thread(
@@ -989,6 +1114,13 @@ def _dispatch(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        reducer_pid = reducer_process.pid
+        if batch_id is not None:
+            launch_record["reducer_pid"] = reducer_pid
+            try:
+                _write_json(task_dir / "launch.json", launch_record)
+            except OSError:
+                pass
         # The parent must close its copy so reducer EOF/SIGPIPE semantics are
         # owned by the two child processes rather than held open here.
         producer.stdout.close()
@@ -1012,6 +1144,9 @@ def _dispatch(
         last_output_time = start_time
         helper_heartbeat_count = 0
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
             now = time.monotonic()
             remaining = deadline - now
             if remaining <= 0:
@@ -1019,10 +1154,15 @@ def _dispatch(
                 break
             time_until_heartbeat = max(0.0, (last_output_time + HELPER_HEARTBEAT_SECONDS) - now)
             wait_timeout = min(remaining, max(0.05, time_until_heartbeat))
+            if cancel_event is not None:
+                wait_timeout = min(wait_timeout, 0.1)
             try:
                 raw_line = reducer_queue.get(timeout=wait_timeout)
             except queue.Empty:
                 now = time.monotonic()
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
                 if now >= deadline:
                     timed_out = True
                     break
@@ -1044,7 +1184,7 @@ def _dispatch(
                         "tools": tools,
                     }
                     reducer_events.append(heartbeat_event)
-                    print(_json_line(heartbeat_event), flush=True)
+                    _emit_dispatch_event(heartbeat_event, event_sink)
                     last_output_time = now
                     helper_heartbeat_count += 1
                 continue
@@ -1058,35 +1198,50 @@ def _dispatch(
                 # This is the only producer-facing output path.  Raw agy
                 # stream lines and tool payloads are never forwarded.
                 reducer_events.append(value)
-                print(_json_line(value), flush=True)
+                _emit_dispatch_event(value, event_sink)
                 last_output_time = time.monotonic()
 
-        if timed_out:
+        if cancelled:
+            reducer_exit = _terminate_process(reducer_process)
+            producer_exit = _terminate_process(producer)
+        elif timed_out:
             reducer_exit = _terminate_process(reducer_process)
             producer_exit = _terminate_process(producer)
         else:
-            remaining = max(0.1, deadline - time.monotonic())
-            try:
-                reducer_exit = reducer_process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                reducer_exit = _terminate_process(reducer_process)
-            # A reducer exits after its final event, but a producer can keep
-            # stdout open briefly while flushing.  Use a short post-final
-            # grace rather than waiting for the full task timeout; this is
-            # still bounded by the overall run deadline.
-            remaining = min(
-                POST_FINAL_PRODUCER_GRACE_SECONDS,
-                max(0.0, deadline - time.monotonic()),
-            )
-            try:
-                producer_exit = producer.wait(timeout=max(0.01, remaining))
-            except subprocess.TimeoutExpired:
-                if time.monotonic() >= deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+            if not cancelled:
+                remaining = max(0.1, deadline - time.monotonic())
+                reducer_exit, wait_cancelled = _wait_process(reducer_process, remaining, cancel_event)
+                if wait_cancelled:
+                    cancelled = True
+                elif reducer_exit is None:
                     timed_out = True
-                else:
-                    producer_grace_exceeded = True
+                    reducer_exit = _terminate_process(reducer_process)
+            if cancelled:
+                reducer_exit = _terminate_process(reducer_process)
                 producer_exit = _terminate_process(producer)
+            elif timed_out:
+                producer_exit = _terminate_process(producer)
+            else:
+                # A reducer exits after its final event, but a producer can
+                # keep stdout open briefly while flushing.  Use a short
+                # post-final grace rather than waiting for the full task
+                # timeout; this is still bounded by the lane deadline.
+                remaining = min(
+                    POST_FINAL_PRODUCER_GRACE_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
+                producer_exit, wait_cancelled = _wait_process(producer, remaining, cancel_event)
+                if wait_cancelled:
+                    cancelled = True
+                    producer_exit = _terminate_process(producer)
+                elif producer_exit is None:
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                    else:
+                        producer_grace_exceeded = True
+                    producer_exit = _terminate_process(producer)
         if reducer_stdout_thread:
             reducer_stdout_thread.join(timeout=5)
         if producer_stderr_thread:
@@ -1103,8 +1258,16 @@ def _dispatch(
             producer_stderr_thread.join(timeout=5)
         if reducer_stderr_thread:
             reducer_stderr_thread.join(timeout=5)
+    if producer is not None and producer.stdout is not None:
+        try:
+            producer.stdout.close()
+        except OSError:
+            pass
     final_event = next((event for event in reversed(reducer_events) if event.get("event") == "final"), None)
-    if spawn_error:
+    if cancelled:
+        status = "cancelled"
+        return_code = EXIT_DISPATCH_FAILED
+    elif spawn_error:
         status = "dispatch_failed"
         return_code = EXIT_DISPATCH_FAILED
     elif timed_out:
@@ -1139,6 +1302,18 @@ def _dispatch(
         "producer_grace_timeout": producer_grace_exceeded,
         "producer_grace_seconds": POST_FINAL_PRODUCER_GRACE_SECONDS,
     }
+    if batch_id is not None:
+        summary.update(
+            {
+                "batch_id": batch_id,
+                "job_id": job_id,
+                "cancelled": cancelled,
+                "started_at": started_at,
+                "deadline_at": deadline_at,
+                "producer_pid": producer_pid,
+                "reducer_pid": reducer_pid,
+            }
+        )
     if final_event:
         summary["final"] = final_event
         if "verdict" in final_event:
@@ -1152,8 +1327,359 @@ def _dispatch(
     _write_exit(task_dir / "producer-exit.txt", producer_exit)
     _write_exit(task_dir / "reducer-exit.txt", reducer_exit)
     _write_json(task_dir / "run.json", summary)
-    print(_json_line(summary), flush=True)
+    _emit_dispatch_event(summary, event_sink)
     return return_code, summary
+
+
+def _workspace_overlaps(left: Any, right: Any) -> bool:
+    """Return whether two normalized workspaces are equal or ancestor-related."""
+    left_text = _normalise_path(str(left)) or os.path.normcase(os.path.normpath(os.path.abspath(str(left))))
+    right_text = _normalise_path(str(right)) or os.path.normcase(os.path.normpath(os.path.abspath(str(right))))
+    try:
+        common = os.path.normcase(os.path.normpath(os.path.commonpath([left_text, right_text])))
+    except ValueError:
+        return False
+    return common == left_text or common == right_text
+
+
+def _batch_job_is_write(job: Mapping[str, Any]) -> bool:
+    return not bool(PRESETS[job["preset"]]["read_only"])
+
+
+def _batch_job_can_start(job: Mapping[str, Any], active_jobs: Iterable[Mapping[str, Any]]) -> bool:
+    job_is_write = _batch_job_is_write(job)
+    for active in active_jobs:
+        if not _workspace_overlaps(job["request"]["workspace"], active["request"]["workspace"]):
+            continue
+        if job_is_write or _batch_job_is_write(active):
+            return False
+    return True
+
+
+def _select_batch_job(
+    pending_indices: Sequence[int],
+    jobs: Sequence[Mapping[str, Any]],
+    active_jobs: Iterable[Mapping[str, Any]],
+) -> Optional[int]:
+    active_list = list(active_jobs)
+    pending_writers = [jobs[index] for index in pending_indices if _batch_job_is_write(jobs[index])]
+    # Ready writes get admission priority so an overlapping write cannot be
+    # postponed by an unbounded stream of newly admitted reads.
+    for index in pending_indices:
+        job = jobs[index]
+        if _batch_job_is_write(job) and _batch_job_can_start(job, active_list):
+            return index
+    for index in pending_indices:
+        job = jobs[index]
+        if _batch_job_is_write(job) or not _batch_job_can_start(job, active_list):
+            continue
+        if any(
+            _workspace_overlaps(job["request"]["workspace"], writer["request"]["workspace"])
+            for writer in pending_writers
+        ):
+            # A pending overlapping writer reserves this workspace.  Reads in
+            # other workspaces can still be admitted while its current lock is
+            # draining.
+            continue
+        return index
+    return None
+
+
+def _batch_terminal_summary(
+    job: Mapping[str, Any],
+    status: str,
+    *,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "event": "run",
+        "task_id": None,
+        "status": status,
+        "producer_exit_code": None,
+        "reducer_exit_code": None,
+        "task_dir": None,
+        "task_path": None,
+        "state_path": None,
+        "raw_log_path": None,
+        "timeout": status == "timeout",
+        "cancelled": status == "cancelled",
+        "producer_grace_timeout": False,
+        "producer_grace_seconds": POST_FINAL_PRODUCER_GRACE_SECONDS,
+        "started_at": None,
+        "deadline_at": None,
+        "producer_pid": None,
+        "reducer_pid": None,
+    }
+    if error:
+        summary["error"] = error
+    return summary
+
+
+def _batch_job_result(
+    job: Mapping[str, Any],
+    code: int,
+    lane_summary: Mapping[str, Any],
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "job_id": job["job_id"],
+        "preset": job["preset"],
+        "workspace": job["request"]["workspace"],
+        "status": lane_summary.get("status", "dispatch_failed"),
+        "exit_code": code,
+    }
+    for key in (
+        "task_id",
+        "producer_exit_code",
+        "reducer_exit_code",
+        "task_dir",
+        "task_path",
+        "state_path",
+        "raw_log_path",
+        "timeout",
+        "cancelled",
+        "producer_grace_timeout",
+        "producer_grace_seconds",
+        "started_at",
+        "deadline_at",
+        "producer_pid",
+        "reducer_pid",
+        "final",
+        "verdict",
+        "error",
+        "evidence",
+    ):
+        if key in lane_summary:
+            result[key] = lane_summary[key]
+    return result
+
+
+def _dispatch_batch(
+    request: Mapping[str, Any],
+    *,
+    agy: Optional[str],
+    schema: Path = DEFAULT_SCHEMA,
+    reducer: Path = DEFAULT_REDUCER,
+    skip_preflight: bool = False,
+    run_timeout: float = DEFAULT_RUN_TIMEOUT_SECONDS,
+    cancel_event: Optional[threading.Event] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    normalized = _validate_batch_request(request)
+    batch_id = normalized["batch_id"] or _generate_batch_id()
+    jobs: List[Dict[str, Any]] = normalized["jobs"]
+    max_parallel = normalized["max_parallel"]
+    if cancel_event is None:
+        cancel_event = threading.Event()
+
+    output_lock = threading.Lock()
+
+    def emit(payload: Mapping[str, Any]) -> None:
+        with output_lock:
+            print(_json_line(payload), flush=True)
+
+    def emit_lane(job_id: str, payload: Mapping[str, Any]) -> None:
+        decorated: Dict[str, Any] = {
+            "event": payload.get("event"),
+            "batch_id": batch_id,
+            "job_id": job_id,
+        }
+        decorated.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in {"event", "batch_id", "job_id"}
+            }
+        )
+        emit(decorated)
+
+    emit(
+        {
+            "event": "batch",
+            "batch_id": batch_id,
+            "status": "started",
+            "max_parallel": max_parallel,
+            "job_count": len(jobs),
+            "jobs": [
+                {
+                    "job_id": job["job_id"],
+                    "preset": job["preset"],
+                    "workspace": job["request"]["workspace"],
+                    "status": "queued",
+                }
+                for job in jobs
+            ],
+        }
+    )
+
+    if not skip_preflight:
+        doctor_code, doctor_result = _doctor(agy)
+        if doctor_code != EXIT_READY:
+            preflight_jobs = [
+                {
+                    "job_id": job["job_id"],
+                    "preset": job["preset"],
+                    "workspace": job["request"]["workspace"],
+                    "status": "preflight_failed",
+                    "exit_code": doctor_code,
+                }
+                for job in jobs
+            ]
+            summary = {
+                "event": "batch",
+                "batch_id": batch_id,
+                "status": "preflight_failed",
+                "exit_code": doctor_code,
+                "max_parallel": max_parallel,
+                "job_count": len(jobs),
+                "jobs_completed": 0,
+                "jobs_blocked": 0,
+                "jobs_failed": len(jobs),
+                "jobs_cancelled": 0,
+                "jobs": preflight_jobs,
+                "problems": doctor_result["problems"],
+                "next_action": doctor_result["next_action"],
+            }
+            emit(summary)
+            return doctor_code, summary
+
+    pending: List[int] = list(range(len(jobs)))
+    active: Dict[int, Mapping[str, Any]] = {}
+    results: Dict[int, Tuple[int, Dict[str, Any]]] = {}
+    completed_queue: "queue.Queue[Tuple[int, int, Dict[str, Any]]]" = queue.Queue()
+    cancellation_observed = False
+
+    def worker(index: int) -> None:
+        job = jobs[index]
+
+        def lane_sink(payload: Mapping[str, Any]) -> None:
+            emit_lane(job["job_id"], payload)
+
+        try:
+            code, lane_summary = _dispatch(
+                job["request"],
+                job["preset"],
+                agy=agy,
+                schema=schema,
+                reducer=reducer,
+                skip_preflight=True,
+                run_timeout=run_timeout,
+                cancel_event=cancel_event,
+                event_sink=lane_sink,
+                batch_id=batch_id,
+                job_id=job["job_id"],
+            )
+        except HelperError as exc:
+            code = exc.code
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=exc.message)
+            emit_lane(job["job_id"], lane_summary)
+        except Exception as exc:
+            code = EXIT_DISPATCH_FAILED
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=_bounded_text(exc))
+            emit_lane(job["job_id"], lane_summary)
+        completed_queue.put((index, code, lane_summary))
+
+    def mark_pending(status: str, error: Optional[str] = None) -> None:
+        while pending:
+            index = pending.pop(0)
+            job = jobs[index]
+            lane_summary = _batch_terminal_summary(job, status, error=error)
+            results[index] = (EXIT_DISPATCH_FAILED, lane_summary)
+            emit_lane(job["job_id"], lane_summary)
+
+    def drain_active() -> None:
+        while active:
+            try:
+                index, code, lane_summary = completed_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            active.pop(index, None)
+            results[index] = (code, lane_summary)
+
+    try:
+        while pending or active:
+            if cancel_event.is_set():
+                cancellation_observed = True
+                mark_pending("cancelled")
+
+            while not cancellation_observed and len(active) < max_parallel:
+                index = _select_batch_job(pending, jobs, active.values())
+                if index is None:
+                    break
+                pending.remove(index)
+                job = jobs[index]
+                active[index] = job
+                emit_lane(
+                    job["job_id"],
+                    {
+                        "event": "job",
+                        "status": "running",
+                        "preset": job["preset"],
+                        "workspace": job["request"]["workspace"],
+                    },
+                )
+                thread = threading.Thread(target=worker, args=(index,), daemon=True)
+                try:
+                    thread.start()
+                except Exception as exc:
+                    active.pop(index, None)
+                    code = EXIT_DISPATCH_FAILED
+                    lane_summary = _batch_terminal_summary(job, "dispatch_failed", error=_bounded_text(exc))
+                    results[index] = (code, lane_summary)
+                    emit_lane(job["job_id"], lane_summary)
+
+            if not active:
+                if pending:
+                    mark_pending("dispatch_failed", "scheduler could not admit a valid job")
+                break
+            try:
+                index, code, lane_summary = completed_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            active.pop(index, None)
+            results[index] = (code, lane_summary)
+    except KeyboardInterrupt:
+        cancellation_observed = True
+        cancel_event.set()
+        mark_pending("cancelled")
+        drain_active()
+
+    if cancellation_observed:
+        # Workers have been drained above when Ctrl+C was received; for an
+        # externally set event the normal loop also drains every active lane.
+        drain_active()
+        if pending:
+            mark_pending("cancelled")
+    for index, job in enumerate(jobs):
+        if index not in results:
+            lane_summary = _batch_terminal_summary(job, "dispatch_failed", error="lane did not produce a terminal summary")
+            results[index] = (EXIT_DISPATCH_FAILED, lane_summary)
+            emit_lane(job["job_id"], lane_summary)
+
+    job_results = [_batch_job_result(job, results[index][0], results[index][1]) for index, job in enumerate(jobs)]
+    statuses = [job["status"] for job in job_results]
+    if cancellation_observed or any(status == "cancelled" for status in statuses):
+        batch_status = "cancelled"
+    elif any(status not in {"completed", "blocked"} for status in statuses):
+        batch_status = "failed"
+    elif any(status == "blocked" for status in statuses):
+        batch_status = "blocked"
+    else:
+        batch_status = "completed"
+    batch_exit_code = 0 if batch_status in {"completed", "blocked"} else EXIT_DISPATCH_FAILED
+    summary = {
+        "event": "batch",
+        "batch_id": batch_id,
+        "status": batch_status,
+        "exit_code": batch_exit_code,
+        "max_parallel": max_parallel,
+        "job_count": len(jobs),
+        "jobs_completed": sum(status == "completed" for status in statuses),
+        "jobs_blocked": sum(status == "blocked" for status in statuses),
+        "jobs_failed": sum(status not in {"completed", "blocked", "cancelled"} for status in statuses),
+        "jobs_cancelled": sum(status == "cancelled" for status in statuses),
+        "jobs": job_results,
+    }
+    emit(summary)
+    return batch_exit_code, summary
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1175,10 +1701,23 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RUN_TIMEOUT_SECONDS,
         help="Bound the exact agy/reducer dispatch in seconds (default: 1860)",
     )
+
+    batch = subparsers.add_parser("batch", help="dispatch independent preset jobs with at most three active lanes")
+    batch_requests = batch.add_mutually_exclusive_group(required=True)
+    batch_requests.add_argument("--request-stdin", action="store_true", help="read one bounded UTF-8 JSON line from stdin")
+    batch_requests.add_argument("--request-file", help="read a bounded UTF-8 JSON object from a file")
+    batch.add_argument("--agy", help="explicit agy executable, primarily for controlled fixtures")
+    batch.add_argument(
+        "--run-timeout",
+        type=_positive_run_timeout,
+        default=DEFAULT_RUN_TIMEOUT_SECONDS,
+        help="Bound each exact batch lane in seconds (default: 1860)",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _configure_stdout_utf8()
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "doctor":
@@ -1189,12 +1728,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(_json_line(result))
             return code
         request = _read_request(args)
-        code, _ = _dispatch(
-            request,
-            args.preset,
-            agy=args.agy,
-            run_timeout=args.run_timeout,
-        )
+        if args.command == "batch":
+            code, _ = _dispatch_batch(request, agy=args.agy, run_timeout=args.run_timeout)
+        else:
+            code, _ = _dispatch(
+                request,
+                args.preset,
+                agy=args.agy,
+                run_timeout=args.run_timeout,
+            )
         return code
     except HelperError as exc:
         result: Dict[str, Any] = {
