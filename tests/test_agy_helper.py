@@ -840,6 +840,166 @@ class HelperContractTests(unittest.TestCase):
                     with self.assertRaises(Exception):
                         agy_helper._positive_run_timeout(timeout)
 
+    def test_invalid_request_aggregates_base_fields_before_doctor_or_task(self) -> None:
+        from scripts import agy_helper
+
+        with tempfile.TemporaryDirectory(prefix="agy-helper-aggregate-base-") as raw:
+            root = Path(raw) / "workspace"
+            root.mkdir()
+            invalid_request = {
+                "workspace": str(root),
+                "goal": "",
+                "scope": ["src/**"],
+                "acceptance": ["return evidence"],
+            }
+            with mock.patch.object(agy_helper, "_doctor") as doctor:
+                with mock.patch.object(agy_helper, "_create_task") as create_task:
+                    with self.assertRaises(agy_helper.HelperError) as context:
+                        agy_helper._dispatch(invalid_request, "review-local")
+            doctor.assert_not_called()
+            create_task.assert_not_called()
+            self.assertEqual({item["path"] for item in context.exception.detail["errors"]}, {"goal"})
+
+            fake_dir = Path(raw) / "fake"
+            fake_dir.mkdir()
+            agy = _make_fake_agy(fake_dir)
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "run",
+                    "--preset",
+                    "review-local",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                ],
+                input="{}\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(process.returncode, 20, process.stderr)
+            result = json.loads(process.stdout)
+            self.assertEqual(result["event"], "error")
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["code"], 20)
+            self.assertEqual(
+                {item["path"] for item in result["errors"]},
+                {"workspace", "goal", "scope", "acceptance"},
+            )
+            self.assertTrue(all({"path", "expected", "hint", "message"} <= set(item) for item in result["errors"]))
+            self.assertIn("SKILL.md", result["docs"])
+            self.assertFalse((root / ".antigravity-help-me").exists())
+
+    def test_change_and_repair_aggregate_preset_requirements(self) -> None:
+        from scripts import agy_helper
+
+        with tempfile.TemporaryDirectory(prefix="agy-helper-aggregate-presets-") as raw:
+            root = Path(raw) / "workspace"
+            root.mkdir()
+            base = _base_request(root)
+            for preset, expected in (
+                ("change", {"allowed_changes", "authorization"}),
+                ("repair", {"allowed_changes", "authorization", "parent_task_id", "failure"}),
+            ):
+                with self.subTest(preset=preset):
+                    with self.assertRaises(agy_helper.HelperError) as context:
+                        agy_helper._validate_request(base, preset)
+                    self.assertEqual(
+                        {item["path"] for item in context.exception.detail["errors"]},
+                        expected,
+                    )
+
+    def test_batch_validation_aggregates_full_job_paths(self) -> None:
+        from scripts import agy_helper
+
+        batch_request = {
+            "max_parallel": 0,
+            "jobs": [
+                {"preset": "review-local", "request": {"scope": []}},
+                {"preset": "review-local", "request": {"workspace": 7}},
+            ],
+        }
+        with mock.patch.object(agy_helper, "_doctor") as doctor:
+            with mock.patch.object(agy_helper, "_create_task") as create_task:
+                with self.assertRaises(agy_helper.HelperError):
+                    agy_helper._dispatch_batch(batch_request)
+        doctor.assert_not_called()
+        create_task.assert_not_called()
+
+        with self.assertRaises(agy_helper.HelperError) as context:
+            agy_helper._validate_batch_request(batch_request)
+        paths = {item["path"] for item in context.exception.detail["errors"]}
+        self.assertIn("max_parallel", paths)
+        self.assertIn("jobs[0].request.scope", paths)
+        self.assertIn("jobs[1].request.workspace", paths)
+        self.assertIn("jobs[1].request.goal", paths)
+
+    def test_reserved_request_fields_warn_without_overriding_preset(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agy-helper-reserved-warning-") as raw:
+            root = Path(raw) / "workspace"
+            root.mkdir()
+            fake_dir = Path(raw) / "fake"
+            fake_dir.mkdir()
+            agy = _make_fake_agy(fake_dir)
+            request = {
+                **_base_request(root),
+                "allowed_changes": ["src/auth.py"],
+                "authorization": "explicit fixture authorization",
+                "task_id": "user-supplied-id",
+                "task_mode": "REVIEW",
+            }
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(HELPER),
+                    "run",
+                    "--preset",
+                    "change",
+                    "--request-stdin",
+                    "--agy",
+                    str(agy),
+                ],
+                input=json.dumps(request, ensure_ascii=False) + "\n",
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+            warning_events = [event for event in events if event.get("event") == "warning"]
+            self.assertEqual(len(warning_events), 1)
+            self.assertEqual(
+                {item["path"] for item in warning_events[0]["warnings"]},
+                {"task_id", "task_mode"},
+            )
+            summary = events[-1]
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual({item["path"] for item in summary["warnings"]}, {"task_id", "task_mode"})
+            launch = json.loads((Path(summary["task_path"]).parent / "launch.json").read_text(encoding="utf-8"))
+            self.assertEqual(launch["task_mode"], "CHANGE")
+            self.assertIn("accept-edits", launch["agy_argv"])
+
+    def test_explicit_optional_constraints_remain_nonempty(self) -> None:
+        from scripts import agy_helper
+
+        with tempfile.TemporaryDirectory(prefix="agy-helper-optional-validation-") as raw:
+            root = Path(raw) / "workspace"
+            root.mkdir()
+            base = _base_request(root)
+            for field, value in (("stop_conditions", []), ("read_allowlist", None)):
+                with self.subTest(field=field):
+                    with self.assertRaises(agy_helper.HelperError) as context:
+                        agy_helper._validate_request({**base, field: value}, "review-local")
+                    self.assertIn(field, {item["path"] for item in context.exception.detail["errors"]})
+
     def test_producer_failure_is_not_accepted_even_with_valid_final(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agy-helper-exit-") as raw:
             root = Path(raw) / "workspace"

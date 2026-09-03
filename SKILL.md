@@ -29,17 +29,56 @@ Windows 可用已验证的 `py -3`。`doctor` 对选定模型执行精确可用�
 python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-stdin [--model <MODEL_ID>]
 ```
 
-也可用 `--request-file <ABS_REQUEST_JSON>`。普通最小请求只包含
-`workspace`、`goal`、`scope`、`acceptance`；默认 `required_tools` 为空，不强加工具预算、读取 allowlist 或额外停止条件。
+最小请求是一个可直接运行的四字段 JSON 对象：
+
+```json
+{
+  "workspace": "E:\\project",
+  "goal": "审查登录流程",
+  "scope": ["src/auth/**", "tests/auth/**"],
+  "acceptance": ["每项发现包含文件和证据"]
+}
+```
+
+运行前请将示例中的 `workspace` 替换为实际已存在的绝对目录；命令中的 `<ABS_REPO>` 也替换为本技能所在仓库路径。
+`--request-stdin` 只读取一行 UTF-8 JSON；不要把格式化 JSON 多行写入 stdin，需多行时保存为文件并使用
+`--request-file <ABS_REQUEST_JSON>`。`workspace` 必须是已存在目录的绝对路径；`scope` 是相对 workspace 的路径/glob
+或范围说明字符串列表，不是硬访问控制。`task_id` 由 helper 生成，任务模式由 CLI 的 `--preset` 选择，不要在 JSON
+中用 `task_id` 或 `task_mode` 覆盖它们（这些字段会保留兼容但给出非阻断提示）。默认 `required_tools` 为空，不强加工具预算、读取 allowlist 或额外停止条件。
+
+macOS/Linux 实际调用（stdin 保持一行）：
+
+```bash
+printf '%s\n' '{"workspace":"/Users/me/project","goal":"审查登录流程","scope":["src/auth/**"],"acceptance":["输出文件和证据"]}' \
+  | python3 "<ABS_REPO>/scripts/agy_helper.py" run --preset review-local --request-stdin
+```
+
+Windows PowerShell 实际调用（含 5.1；临时设置 UTF-8，避免原生命令管道把中文转成问号）：
+
+```powershell
+$request = '{"workspace":"C:\\project","goal":"审查登录流程","scope":["src/auth/**"],"acceptance":["输出文件和证据"]}'
+$agyPreviousOutputEncoding = $OutputEncoding
+try {
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $request | py -3 "<ABS_REPO>\scripts\agy_helper.py" run --preset review-local --request-stdin
+} finally {
+    $OutputEncoding = $agyPreviousOutputEncoding
+}
+```
+
+或使用 UTF-8（无 BOM）的多行请求文件；与上述 stdin 方式二选一：
+
+```powershell
+py -3 "<ABS_REPO>\scripts\agy_helper.py" run --preset review-local --request-file "C:\temp\request.json"
+```
+
+五个 preset 的额外要求：`review-local` 和 `review-external` 无额外字段；`change` 需要非空
+`allowed_changes` 与 `authorization`；`repair` 还需要合法 `parent_task_id` 与非空 `failure`；`verify` 需要非空
+`subject`，只读且 completed 结果必须有 `verdict: pass|fail`。五类映射、请求字段、framing、退出语义和保留的内部
+文件见 [references/fast-path.md](references/fast-path.md)。
 当 `--request-stdin` 连接交互式 TTY 时，helper 会临时关闭终端 echo 并在退出时可靠恢复（兼容 Windows Console/ConPTY 与 POSIX；无法切换时不破坏输入并建议使用 `--request-file`）。连续 75 秒无可见 compact 输出且 producer 仍在运行时，helper 发出自身低频 heartbeat（不依赖 reducer 的 2 KiB progress 预算）。
 helper 会安全生成 task id、内部 TASK.md、固定 Agy/reducer argv、state/raw log 和退出码证据。
 正文不进入命令行参数、环境变量或固定 prompt，因此不会受到 Windows 终端参数长度限制。
-
-可用 preset 为 `review-local`、`review-external`、`change`、`repair`、`verify`。
-`change`/`repair` 需要显式 `allowed_changes` 与 `authorization`；`repair` 还需要
-`parent_task_id`、`failure`；`verify` 需要 `subject`，使用新 conversation、只读，
-completed 时要求 `verdict: pass|fail`；blocked 保留 blocked 语义。五类映射、请求字段、framing、退出语义和保留的内部
-文件见 [references/fast-path.md](references/fast-path.md)。
 
 当多个任务彼此独立且工作区策略允许时，可在一次 helper 调用中使用 `batch`（支持 `--model` 统一指定批次模型，批次内所有 job 使用同一选定模型）：
 

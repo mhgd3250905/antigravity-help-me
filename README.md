@@ -47,6 +47,8 @@ python scripts/agy_helper.py run --preset review-local --model gemini-3.8-flash-
 python scripts/agy_helper.py batch --request-stdin
 ```
 
+请求 stdin 是一行 UTF-8 JSON；格式化多行请求请改用 `--request-file`。最小四字段模板、macOS/Windows 调用方式、preset 额外字段和错误说明见 [SKILL.md](SKILL.md) 与 [references/fast-path.md](references/fast-path.md)。
+
 ### 单任务与多任务 Batch
 
 - **单任务（`run`）**：单个明确任务（如审查、修改或验证），由 helper 运行单路 Agy 并返回结构化结果。支持 `--model`（默认 `gemini-3.8-flash-high`，从 `-high`/`-medium`/`-low` 后缀自动推导 `--effort`）。
@@ -103,6 +105,8 @@ python scripts/agy_helper.py run --preset review-local --model gemini-3.8-flash-
 # Independent multi-task dispatch (one model per batch, 1..3 parallel lanes; default model shown)
 python scripts/agy_helper.py batch --request-stdin
 ```
+
+Requests sent through stdin must be one UTF-8 JSON line; use `--request-file` for formatted multi-line JSON. See [SKILL.md](SKILL.md) and [references/fast-path.md](references/fast-path.md) for the minimal four-field template, macOS/Windows invocations, preset requirements, and validation errors.
 
 ### Single Task vs. Batch
 

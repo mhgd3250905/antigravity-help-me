@@ -52,6 +52,15 @@ python <ABS_REPO>\scripts\agy_helper.py run --preset review-local --request-file
 }
 ```
 
+这是 helper 可直接运行的最小四字段请求。`workspace` 必须是已存在目录的绝对路径；`scope` 是相对 workspace
+的路径/glob 或范围说明字符串列表，不是硬访问控制。`--request-stdin` 只读取一行 UTF-8 JSON；格式化多行 JSON
+请改用 `--request-file <ABS_REQUEST_JSON>`。`task_id` 由 helper 生成，任务模式由 CLI `--preset` 选择；请求中的
+`task_id`/`task_mode` 会保留兼容但只产生非阻断 warning，不会改变实际 preset 语义。
+
+请求校验失败时 helper 保持 `event=error`、`status=error`、`code=20` 和 `message` 兼容，并额外返回一次汇总的
+`errors` 数组；每项含 `path`、`expected`、`hint`、`message`，同时给出本技能输入文档指引。batch 会继续检查可判定
+的其他 job，并把请求错误定位为 `jobs[0].request.scope` 这类完整路径。JSON 语法错误或根结构不是对象时可直接退出。
+
 默认 `required_tools` 为空，不生成或执行默认工具调用预算、读取 allowlist、每工具限制或多余停止条款。只有用户显式提供的 constraints（如 `required_tools`、`tool_budget`、`read_allowlist`、`stop_conditions`）才进入任务契约。
 若显式提供 `tool_budget`，可包含 `max_total_calls`、`max_calls_per_tool`、`max_updates`（传给 reducer）和 `stop_when_exhausted`；数值必须是有界正整数，布尔值只能用于 `stop_when_exhausted`。未显式提供 `tool_budget` 时，工具计数仅用于可观测性，宿主和 helper 均不施加默认上限，不构成 fail-closed 或停机条件，不得因调用次数停止 Agy 或触发返修。
 
