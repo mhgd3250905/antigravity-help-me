@@ -17,7 +17,7 @@ Before submitting changes, please ensure your contribution aligns with the proje
    - The CLI prompt passed in `argv` is fixed and minimal to eliminate shell quoting hazards, command line length limits, and prompt injection vulnerabilities.
 
 3. **Explicit Model Selection & Fail-Fast**:
-   - Fixed to `gemini-3.7-flash-high`.
+   - Defaults to `gemini-3.8-flash-high` with optional `--model` override.
    - No silent fallbacks or implicit model switching. If the target model or CLI is unavailable, fail immediately with clear diagnostic logs.
 
 4. **Clear Separation of Duties**:

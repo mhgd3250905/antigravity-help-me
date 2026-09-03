@@ -48,6 +48,7 @@ python scripts/agy_helper.py batch --request-stdin
 ```
 
 请求 stdin 是一行 UTF-8 JSON；格式化多行请求请改用 `--request-file`。最小四字段模板、macOS/Windows 调用方式、preset 额外字段和错误说明见 [SKILL.md](SKILL.md) 与 [references/fast-path.md](references/fast-path.md)。
+`run`/`batch` 的五个 preset 默认传入 `--dangerously-skip-permissions` 跳过 CLI 交互确认，任务授权和结构化验收不变；`doctor` 只做能力探测。
 
 ### 单任务与多任务 Batch
 
@@ -107,6 +108,7 @@ python scripts/agy_helper.py batch --request-stdin
 ```
 
 Requests sent through stdin must be one UTF-8 JSON line; use `--request-file` for formatted multi-line JSON. See [SKILL.md](SKILL.md) and [references/fast-path.md](references/fast-path.md) for the minimal four-field template, macOS/Windows invocations, preset requirements, and validation errors.
+All five `run`/`batch` presets pass `--dangerously-skip-permissions` by default to skip CLI confirmation prompts, while task authorization and structured acceptance remain unchanged; `doctor` only probes capabilities.
 
 ### Single Task vs. Batch
 

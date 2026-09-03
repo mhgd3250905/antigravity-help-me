@@ -3,7 +3,7 @@
 `scripts/agy_helper.py` 把固定的环境判断和命令装配收敛为 bridge-first 的统一入口：
 核心是做好主会话向 Agy 转发完整任务、实时监督、保存证据并把结构化结果带回主会话。
 宿主 Agent 仍负责目标、授权、范围和最终验收；helper 负责确定性校验、任务契约和
-进程监督，不安装、升级、登录或扩大 Agy 权限，默认不附加微观工具限制或调用预算。
+进程监督，不安装、升级、登录，不改全局权限配置或扩大任务授权，默认不附加微观工具限制或调用预算。
 
 ## 1. 先做 doctor
 
@@ -18,7 +18,7 @@ Windows 也可以用已验证的 `py -3`。`doctor` 只读检查：
 - `agy` 是否存在且可运行；
 - `agy --version`：版本 `1.1.24` 标记为 `tested`；其他版本若能力齐全则 `status=ready` 且 `compatibility=compatible_unverified`，不硬阻断；
 - `agy --help` 是否包含工作区、mode、print、model、effort、stream/json、schema、
-  timeout、conversation 和按需权限参数；
+  timeout、conversation 和默认执行所需权限参数；
 - `agy --output-format json models` 是否成功且精确包含
   选定模型（默认 `gemini-3.8-flash-high`，执行精确可用性检查）；
 - 当前 Python 以及本仓库 `scripts\agy_stream_reducer.py --help` 是否可用。
@@ -171,10 +171,12 @@ run.json
 ```
 
 helper 使用 argv 数组从 workspace 启动 Agy，同时传入 `--add-dir`、选定模型
-（默认 `gemini-3.8-flash-high`）、推导的 `--effort`（默认 `high`）、schema、`stream-json` 和 print timeout。
+（默认 `gemini-3.8-flash-high`）、推导的 `--effort`（默认 `high`）、默认的
+`--dangerously-skip-permissions`、schema、`stream-json` 和 print timeout。
 TASK.md、launch.json 以及 run/batch 汇总均记录选定 model 与 effort。
 `REVIEW_LOCAL` 使用 `--mode plan`，`REVIEW_EXTERNAL` 省略 mode，`CHANGE` 使用
-`--mode accept-edits`。默认不传 `--dangerously-skip-permissions`。
+`--mode accept-edits`；五个 preset 默认都传入 `--dangerously-skip-permissions`，该 flag
+仅免除 CLI 交互确认，不扩大 TASK.md 中的业务授权。`doctor` 只做探测，不传入该执行 flag。
 
 `run` 默认把本次精确 producer/reducer 调度限制在 1860 秒（覆盖 Agy 默认的
 1800 秒 print timeout），也可用 `--run-timeout` 调整到 1–7200 秒。超时时先对

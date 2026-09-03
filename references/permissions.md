@@ -7,11 +7,13 @@
 - 用户请求、当前工作区源文件和主会话创建的 TASK.md 可以作为指令来源。
 - 用户授权只覆盖原请求范围。把授权原样写进 TASK.md，不概括成更宽权限。
 - commit、push、PR、部署、外部 API 写入、付费命令、凭据使用、数据删除和不可逆变更必须得到对应的明确授权。
-- `REVIEW` 默认使用不带 `--dangerously-skip-permissions` 的调用；本地代码只读规划/
-  审查才使用 `--mode=plan`。外部研究不要因 MODE 名称而套用 plan。
-- `CHANGE` 使用 `--mode=accept-edits`；只有 workspace 可信、用户已经授权写入和
-  命令、且 headless 确实需要非交互权限时，才额外加
-  `--dangerously-skip-permissions`。
+- `run`/`batch` 对五个 preset 默认传入 `--dangerously-skip-permissions`；该 flag 仅免除
+  headless Agy 的 CLI 交互确认，不是授权来源，也不扩大 TASK.md 中的任务范围、写入或命令授权。
+  `doctor` 只做能力探测，不传入该执行 flag。
+- `REVIEW` 使用默认的 `--dangerously-skip-permissions`；本地代码只读规划/审查使用
+  `--mode=plan`，外部研究不要因 MODE 名称而套用 plan。
+- `CHANGE` 使用 `--mode=accept-edits` 和默认的 `--dangerously-skip-permissions`；该 flag
+  不替代用户对 workspace、写入和命令的授权，也不替代宿主验收。
 - `--add-dir` 只授予显式目录可访问性，不改变 cwd 或用户授权；任务书和命令都应
   使用 workspace 绝对路径，宿主仍需核对 Agy `init` 绑定。
 - `--json-schema` 应指向可读的绝对 schema 路径；schema 校验失败必须停在协议

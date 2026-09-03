@@ -4,8 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.3.x   | :white_check_mark: |
-| < 1.3   | :x:                |
+| 1.5.x   | :white_check_mark: |
+| < 1.5   | :x:                |
 
 ---
 
@@ -32,8 +32,8 @@ We will acknowledge receipt of your report promptly and coordinate disclosure re
 `antigravity-help-me` coordinates tasks between a **Host Agent** and the native **Antigravity CLI (`agy`)**. Understanding the trust boundary is essential for secure operation:
 
 1. **`--dangerously-skip-permissions` is Not a Security Sandbox**:
-   - The `--dangerously-skip-permissions` flag allows headless `agy` to invoke tools without interactive confirmation prompts.
-   - It does **not** restrict filesystem or network access.
+   - The `--dangerously-skip-permissions` flag is passed by default across presets to waive CLI confirmation prompts for headless execution.
+   - It is **not** a sandbox, does **not** expand the business authorization granted in `TASK.md`, and does not restrict filesystem or network access.
    - Security boundaries and user authorizations must be actively enforced by the **Host Agent** before dispatching commands.
 
 2. **Handling Untrusted Inputs**:

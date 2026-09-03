@@ -769,6 +769,9 @@ class HelperContractTests(unittest.TestCase):
                     summary = json.loads(process.stdout.splitlines()[-1])
                     task_text = Path(summary["task_path"]).read_text(encoding="utf-8")
                     launch = json.loads((Path(summary["task_path"]).parent / "launch.json").read_text(encoding="utf-8"))
+                    agy_argv = launch["agy_argv"]
+                    self.assertEqual(agy_argv.count("--dangerously-skip-permissions"), 1)
+                    self.assertLess(agy_argv.index("--dangerously-skip-permissions"), agy_argv.index("-p"))
                     self.assertIn(f"执行配置：{expected[preset][0]}", task_text)
                     self.assertIn(f"MODE: {expected[preset][1]}", task_text)
                     self.assertIn(expected[preset][0], launch["reducer_argv"])
@@ -1580,7 +1583,12 @@ class HelperContractTests(unittest.TestCase):
             agy = _make_batch_fake_agy(fake_dir)
             request = {
                 "batch_id": "batch-model-test",
-                "jobs": [_batch_job(workspace, f"job-{index} sleep=0.05") for index in range(2)],
+                "jobs": [
+                    _batch_job(workspace, f"job-{index} sleep=0.05", preset)
+                    for index, preset in enumerate(
+                        ("review-local", "review-external", "change", "repair", "verify")
+                    )
+                ],
             }
 
             # 1. Default model batch
@@ -1616,6 +1624,11 @@ class HelperContractTests(unittest.TestCase):
                 launch = json.loads((task_dir / "launch.json").read_text(encoding="utf-8"))
                 self.assertEqual(launch["model"], "gemini-3.8-flash-high")
                 self.assertEqual(launch["effort"], "high")
+                self.assertEqual(launch["agy_argv"].count("--dangerously-skip-permissions"), 1)
+                self.assertLess(
+                    launch["agy_argv"].index("--dangerously-skip-permissions"),
+                    launch["agy_argv"].index("-p"),
+                )
                 self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-high")
                 self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "high")
                 task_text = (task_dir / "TASK.md").read_text(encoding="utf-8")
@@ -1656,6 +1669,11 @@ class HelperContractTests(unittest.TestCase):
                 launch = json.loads((task_dir / "launch.json").read_text(encoding="utf-8"))
                 self.assertEqual(launch["model"], "gemini-3.8-flash-low")
                 self.assertEqual(launch["effort"], "low")
+                self.assertEqual(launch["agy_argv"].count("--dangerously-skip-permissions"), 1)
+                self.assertLess(
+                    launch["agy_argv"].index("--dangerously-skip-permissions"),
+                    launch["agy_argv"].index("-p"),
+                )
                 self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--model") + 1], "gemini-3.8-flash-low")
                 self.assertEqual(launch["agy_argv"][launch["agy_argv"].index("--effort") + 1], "low")
 

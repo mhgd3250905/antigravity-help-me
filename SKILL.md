@@ -10,6 +10,7 @@ description: "在本机 Antigravity CLI (agy) 可用时，用 bridge-first 命�
 主会话向 Agy 转发完整任务、实时监督、保存证据并把结构化结果带回主会话。
 首选 `scripts/agy_helper.py` 命令优先入口：固定环境判断和命令装配由 helper 完成，
 任务契约仍自动落盘，终态必须符合本技能的 JSON schema。工具调用预算、读取 allowlist 和额外停止条件仅为用户显式 opt-in；未显式提供预算时，工具计数仅用于可观测性，宿主不得自行发明上限，也不得因调用次数停止 Agy 或创建返修任务。
+`run`/`batch` 对五个 preset 默认传入 `--dangerously-skip-permissions`，仅免除 CLI 交互确认，不扩大 TASK.md 中的业务授权；`doctor` 只做能力探测，不传入该执行 flag。
 
 ## 命令优先入口
 
@@ -141,7 +142,7 @@ agy --output-format json models
 确认 `agy` 退出码为 0，模型列表精确包含选定模型（默认 `gemini-3.8-flash-high`），help 支持
 `--add-dir`、`--mode`、`-p`/`--print`、`--model`、`--effort low|medium|high`、
 `--output-format stream-json` 和 `json`、`--json-schema`、`--print-timeout`、
-`--conversation` 以及按模式需要的 `--dangerously-skip-permissions`。所有全局选项放在同一层；调用带子命令时，
+`--conversation`、`--dangerously-skip-permissions`。所有全局选项放在同一层；调用带子命令时，
 例如 `--output-format json` 必须放在 `models` 之前。
 
 要使用实时监督，再探测 Python 3：
@@ -224,6 +225,7 @@ Read the task contract at "<ABS_TASK_PATH>" in full before acting. Execute exact
 由选定模型推导的 `--effort`（默认模型 `gemini-3.8-flash-high` 对应 `--effort high`）。
 Agy 对模型只接受省略 `--effort` 或后缀匹配的 effort，不匹配会产生 model selection conflict。
 无法确定 effort 的模型会被拒绝。
+三个执行配置默认还要传入 `--dangerously-skip-permissions`；该 flag 仅免除 CLI 交互确认，不扩大 TASK.md 中的业务授权。
 若需要控制成本，由用户显式提供的读取/检查 allowlist、prompt-level 工具调用预算或停止条件控制（未显式提供时不强加限制）。
 reducer 调用必须带与 TASK.md 一致的
 `--task-mode REVIEW|CHANGE` 和 `--execution-profile REVIEW_LOCAL|REVIEW_EXTERNAL|CHANGE`
@@ -264,15 +266,14 @@ fallback、补输入或停止。
 ## 三种执行配置与权限分层（helper 与手工 fallback 共用）
 
 - `REVIEW_LOCAL` 是本地代码只读规划/审查：使用 `--mode=plan` 和
-  `--effort high`（或匹配 effort），默认不带
-  `--dangerously-skip-permissions`；不要同时传 `--disable-slash-commands`，否则
+  `--effort high`（或匹配 effort），默认传入
+  `--dangerously-skip-permissions`；该 flag 仅免除 CLI 交互确认，不扩大业务授权；不要同时传 `--disable-slash-commands`，否则
   Agy 1.1.24 的 plan expansion 不生效。
 - `REVIEW_EXTERNAL` 是外部研究或需要 web/其他工具的审查：省略 `--mode`，使用
-  `--effort high`（或匹配 effort），默认
-  不带 `--dangerously-skip-permissions`；不要因“审查”而套 plan，以免改变工具面。
-- `CHANGE` 使用 `--mode=accept-edits` 和 `--effort high`（或匹配 effort）。仅在 workspace 可信、用户已授权写入和
-  命令、且 headless 确实需要非交互权限时，才额外使用
-  `--dangerously-skip-permissions`。该 flag 不扩大授权，也不替代宿主验收。
+  `--effort high`（或匹配 effort），默认传入
+  `--dangerously-skip-permissions`；不要因“审查”而套 plan，以免改变工具面。
+- `CHANGE` 使用 `--mode=accept-edits` 和 `--effort high`（或匹配 effort），默认传入
+  `--dangerously-skip-permissions`。该 flag 仅免除 CLI 交互确认，不扩大授权，也不替代宿主验收。
 
 详细权限边界见 [references/permissions.md](references/permissions.md)。
 
